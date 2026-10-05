@@ -1,18 +1,31 @@
 # thumbsheet
 
-Sábana de miniaturas de un vídeo para Linux (GTK3). Abres un vídeo y aparece un mosaico con una
-captura cada N segundos. Dos controles: **Intervalo** (5–300 s) y **Tamaño** de las teselas.
+Sábana de miniaturas de vídeo para Linux (GTK3). Abres uno o varios vídeos y aparece un mosaico con
+una captura cada N segundos. Controles: **Intervalo** (5–300 s), **Tamaño** de las teselas, y a la
+derecha del contador los botones **LLC** y **Eliminar**.
 
 ```
-thumbsheet vídeo.mp4        # o doble clic / "Abrir con" desde el gestor de archivos
-thumbsheet                  # sin argumento: diálogo para elegir el vídeo
+thumbsheet vídeo.mp4 [otro.mkv ...]   # o "Abrir con" desde el gestor de archivos (admite varios)
+thumbsheet                            # sin argumentos: diálogo para elegir vídeos
 ```
+
+- **Varios vídeos**: se listan en el panel izquierdo (nombre, duración y resolución); clic para ver
+  cada sábana. Se añaden más con `Ctrl+O` o arrastrándolos a la ventana.
+- **Selección de teselas**: clic = alternar una tesela; clic y arrastrar = aplicar a un rango
+  contiguo. Las seleccionadas se recuadran en rojo. `Esc` deselecciona todo. La selección se
+  recuerda por vídeo entre sesiones (en la caché).
+- **LLC**: guarda un proyecto de LosslessCut `<vídeo>-proj.llc` junto al vídeo, con un segmento por
+  cada racha de teselas seleccionadas (del instante de la primera al de la última más el intervalo).
+  Al abrir el vídeo en LosslessCut, los segmentos aparecen ya cargados. El fichero es JSON, válido
+  para el LosslessCut actual (JSON5, esquema v2) y para versiones antiguas (YAML).
+- **Eliminar**: borra el archivo de vídeo del disco directamente, sin papelera, tras confirmar.
 
 El intervalo va **de 5 en 5** (5, 10, 15 … 300). Así todas las capturas caen en segundos múltiplos
 de 5 y se conservan al cambiar el intervalo: pasar de 30 s a 60 s no genera nada, y de 30 s a 10 s
 sólo genera los dos tercios que faltan. Lo ya generado no se tira nunca (vive en la caché de disco).
 
-Atajos: `Ctrl+rueda` o `Ctrl +/-` cambian el tamaño de tesela; `Esc` / `Ctrl+Q` cierran.
+Atajos: la rueda sobre el slider de intervalo mueve ±5 s y sobre el de tamaño ±16 px; `Ctrl+rueda`
+sobre el mosaico o `Ctrl +/-` cambian el tamaño de tesela; `Esc` deselecciona; `Ctrl+Q` cierra.
 
 ## Instalación (Ubuntu / Mint / Debian)
 
@@ -22,7 +35,8 @@ git clone https://github.com/wozzeck/thumbsheet.git ~/ws/thumbsheet
 ~/ws/thumbsheet/install.sh      # enlaza ~/.local/bin/thumbsheet y registra la entrada de menú (sin sudo)
 ```
 
-Actualizar: `git -C ~/ws/thumbsheet pull` (el symlink y la entrada de menú apuntan a la carpeta, no hay más).
+Actualizar: `git -C ~/ws/thumbsheet pull`; si ha cambiado `thumbsheet.desktop`, vuelve a ejecutar
+`install.sh` (la entrada de menú instalada es una copia con las rutas resueltas).
 
 Opcional, para decodificar por GPU (se usa sola si funciona): `intel-media-va-driver` (Intel
 Broadwell+), `i965-va-driver` (Intel más antiguos) o `mesa-va-drivers` (AMD).
@@ -82,6 +96,7 @@ Ajustes (intervalo, tamaño, ventana) se guardan en `~/.config/thumbsheet/settin
 ## Estructura
 
 - `thumbsheet.py` — todo: sondeo (`VideoInfo`), planificador y workers (`Generator`), GPU (`Gpu`),
-  caché/cargador (`PixCache`, `Loader`), mosaico (`Sheet`), ventana (`ThumbSheet`).
+  caché/cargador (`PixCache`, `Loader`), mosaico y selección (`Sheet`), segmentos y proyecto LLC
+  (`selection_segments`, `write_llc_project`), vídeo abierto (`Document`), ventana (`ThumbSheet`).
 - `thumbsheet` — lanzador; `thumbsheet.desktop` + `icon.svg` — entrada de menú; `install.sh`.
 - `tests/` — comprobaciones sin pantalla del generador (ver `tests/README.md`).

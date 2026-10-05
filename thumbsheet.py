@@ -21,6 +21,7 @@ import json
 import math
 import os
 import pathlib
+import queue
 import shutil
 import signal
 import subprocess
@@ -725,17 +726,97 @@ class Sheet(Gtk.DrawingArea):
         self._settle_id = None
         self.loader = Loader(self.cache, self._visible_set, self.queue_draw)
         self.font = Pango.FontDescription("Sans 9")
+        self.selected = set()                 # timestamps seleccionados (el set lo comparte el documento)
+        self.on_selection_changed = None
+        self._drag = None
         self.connect("draw", self.on_draw)
         self.connect("size-allocate", lambda *_: self._relayout())
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK |
+                        Gdk.EventMask.BUTTON1_MOTION_MASK)
+        self.connect("button-press-event", self.on_press)
+        self.connect("motion-notify-event", self.on_motion)
+        self.connect("button-release-event", self.on_release)
         self.set_hexpand(True)
 
     # --- modelo ---
-    def set_video(self, aspect, cache_dir):
+    def set_video(self, aspect, cache_dir, selected=None):
         self.aspect = max(0.2, min(5.0, aspect))
         self.cache_dir = cache_dir
+        self.selected = selected if selected is not None else set()
+        self._drag = None
         self.cache.clear()
         self.loader.cancel_all()
         self.set_plan([])
+
+    # --- selección: clic = alternar una tesela; clic y arrastrar = aplicar a un rango contiguo ---
+    def _tile_at(self, x, y, loose=False):
+        if not self.ts:
+            return None
+        cx, cy = x - self.PAD, y - self.PAD
+        if cx < 0 or cy < 0:
+            if not loose:
+                return None
+            cx, cy = max(0, cx), max(0, cy)
+        col, rx = divmod(int(cx), self.cell_w + self.GAP)
+        row, ry = divmod(int(cy), self.cell_h + self.GAP)
+        if loose:
+            col = min(col, self.cols - 1)
+        elif rx >= self.cell_w or ry >= self.cell_h or col >= self.cols:
+            return None
+        i = row * self.cols + col
+        if i >= len(self.ts):
+            return len(self.ts) - 1 if loose else None
+        return i
+
+    def on_press(self, widget, event):
+        if event.button != 1 or event.type != Gdk.EventType.BUTTON_PRESS:
+            return event.button == 1
+        i = self._tile_at(event.x, event.y)
+        if i is None:
+            return False
+        self._drag = {"i0": i, "mode": self.ts[i] not in self.selected, "snapshot": set(self.selected), "last": None}
+        self._apply_drag(i)
+        return True
+
+    def on_motion(self, widget, event):
+        if self._drag is None or not (event.state & Gdk.ModifierType.BUTTON1_MASK):
+            return False
+        i = self._tile_at(event.x, event.y, loose=True)
+        if i is not None and i != self._drag["last"]:
+            self._apply_drag(i)
+        return True
+
+    def on_release(self, widget, event):
+        if event.button != 1 or self._drag is None:
+            return False
+        self._drag = None
+        if self.on_selection_changed:
+            self.on_selection_changed()
+        return True
+
+    def _apply_drag(self, i):
+        d = self._drag
+        a, b = sorted((d["i0"], i))
+        new = set(d["snapshot"])
+        for k in range(a, b + 1):
+            if d["mode"]:
+                new.add(self.ts[k])
+            else:
+                new.discard(self.ts[k])
+        d["last"] = i
+        if new != self.selected:
+            self.selected.clear()
+            self.selected.update(new)
+            self.queue_draw()
+
+    def clear_selection(self):
+        if not self.selected:
+            return False
+        self.selected.clear()
+        self.queue_draw()
+        if self.on_selection_changed:
+            self.on_selection_changed()
+        return True
 
     def set_plan(self, ts):
         self.ts = list(ts)
@@ -877,6 +958,13 @@ class Sheet(Gtk.DrawingArea):
             cr.set_source_rgb(0.95, 0.95, 0.95)
             cr.move_to(bx + 4, by + 1)
             PangoCairo.show_layout(cr, layout)
+        # recuadro rojo de selección
+        if t in self.selected:
+            lw = 4 if w >= 120 else 3
+            cr.set_source_rgb(0.93, 0.16, 0.16)
+            cr.set_line_width(lw)
+            cr.rectangle(x + lw / 2.0, y + lw / 2.0, w - lw, h - lw)
+            cr.stroke()
 
     @staticmethod
     def _rounded(cr, x, y, w, h, r):
@@ -886,6 +974,113 @@ class Sheet(Gtk.DrawingArea):
         cr.arc(x + r, y + h - r, r, math.pi / 2, math.pi)
         cr.arc(x + r, y + r, r, math.pi, 3 * math.pi / 2)
         cr.close_path()
+
+
+# ----------------------------------------------------------------------------------------------
+# selección → segmentos → proyecto de LosslessCut
+# ----------------------------------------------------------------------------------------------
+def selection_segments(selected, timestamps, interval, duration):
+    """Rachas de teselas seleccionadas contiguas → [(inicio, fin)]. El fin de un segmento es el instante de
+    la última tesela más el intervalo (acotado a la duración)."""
+    segs, prev = [], None
+    for t in timestamps:
+        if t not in selected:
+            prev = None
+            continue
+        end = min(float(t + interval), float(duration))
+        if prev is not None and prev + interval == t and segs:
+            segs[-1][1] = end
+        else:
+            segs.append([float(t), end])
+        prev = t
+    return [(a, b) for a, b in segs if b > a]
+
+
+def llc_project_path(video_path):
+    video_path = pathlib.Path(video_path)
+    return video_path.with_name(video_path.stem + "-proj.llc")
+
+
+def _num(x):
+    x = float(x)
+    return int(x) if x.is_integer() else round(x, 3)
+
+
+def write_llc_project(video_path, segments):
+    """Proyecto de LosslessCut junto al vídeo (<nombre>-proj.llc), que LosslessCut carga solo al abrir el
+    vídeo. Se escribe como JSON: es JSON5 válido (LosslessCut actual, esquema v2) y también YAML válido
+    (versiones antiguas, que guardaban YAML)."""
+    video_path = pathlib.Path(video_path)
+    data = {
+        "version": 2,
+        "mediaFileName": video_path.name,
+        "cutSegments": [{"start": _num(a), "end": _num(b), "name": ""} for a, b in segments],
+    }
+    proj = llc_project_path(video_path)
+    proj.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    return proj
+
+
+# ----------------------------------------------------------------------------------------------
+# documento = un vídeo abierto (sondeo, caché, selección, posición de scroll)
+# ----------------------------------------------------------------------------------------------
+class Document(object):
+    def __init__(self, path):
+        self.path = pathlib.Path(path).resolve()
+        self.info = None
+        self.error = None
+        self.cache_dir = None
+        self.selected = set()
+        self.scroll = 0.0
+        self.row = None
+        self.lock = threading.Lock()
+
+    def ensure_info(self):
+        with self.lock:
+            if self.info is not None or self.error is not None:
+                return
+            try:
+                info = VideoInfo(self.path)
+            except (OSError, RuntimeError) as e:
+                self.error = str(e) or "no se pudo abrir"
+                return
+            cache_dir = CACHE_ROOT / info.key
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            for leftover in cache_dir.glob(".*"):   # tramos/temporales de una ejecución interrumpida
+                if leftover.is_dir():
+                    shutil.rmtree(str(leftover), ignore_errors=True)
+                else:
+                    try:
+                        leftover.unlink()
+                    except OSError:
+                        pass
+            try:
+                sel = json.loads((cache_dir / "selection.json").read_text(encoding="utf-8"))
+                self.selected.update(int(t) for t in sel)
+            except (OSError, ValueError, TypeError):
+                pass
+            self.cache_dir = cache_dir
+            self.info = info
+
+    def save_selection(self):
+        if not self.cache_dir:
+            return
+        try:
+            f = self.cache_dir / "selection.json"
+            if self.selected:
+                f.write_text(json.dumps(sorted(self.selected)), encoding="utf-8")
+            elif f.exists():
+                f.unlink()
+        except OSError:
+            pass
+
+    @property
+    def subtitle(self):
+        if self.error:
+            return "no se pudo abrir"
+        if not self.info:
+            return "analizando…"
+        return "%s · %dx%d" % (fmt_time(self.info.duration), self.info.width, self.info.height)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -906,26 +1101,40 @@ def save_settings(d):
         pass
 
 
+def human_size(n):
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return ("%d %s" if unit == "B" else "%.1f %s") % (n, unit)
+        n /= 1024.0
+
+
 class ThumbSheet(Gtk.Window):
     REGEN_DEBOUNCE_MS = 350
+    FLASH_MS = 4000
 
-    def __init__(self, video_path):
+    def __init__(self, video_paths):
         super(ThumbSheet, self).__init__()
         self.settings = load_settings()
-        self.info = None
+        self.docs = []
+        self.current = None
         self.generator = None
         self._regen_id = None
+        self._flash_id = None
+        self._status_base = ""
+        self._progress = (0, 0)
+        self._wheel_acc = {}
         self.set_default_size(int(self.settings.get("win_w", 1200)), int(self.settings.get("win_h", 800)))
         if self.settings.get("maximized"):
             self.maximize()
         for name in ("icon.png", "icon.svg"):
-            p = APP_DIR / name
-            if p.exists():
+            ic = APP_DIR / name
+            if ic.exists():
                 try:
-                    self.set_icon_from_file(str(p))
+                    self.set_icon_from_file(str(ic))
                     break
                 except GLib.Error:
                     pass
+
         interval = snap_interval(self.settings.get("interval", INTERVAL_DEF))
         tile = int(self.settings.get("tile", TILE_DEF))
         tile = max(TILE_MIN, min(TILE_MAX, tile))
@@ -933,6 +1142,7 @@ class ThumbSheet(Gtk.Window):
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.add(vbox)
 
+        # --- barra de herramientas ---
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         bar.set_margin_start(10)
         bar.set_margin_end(10)
@@ -948,7 +1158,7 @@ class ThumbSheet(Gtk.Window):
             self.interval_scale.add_mark(mark, Gtk.PositionType.BOTTOM, None)
         self.interval_scale.set_hexpand(True)
         self.interval_scale.set_value(interval)
-        self.interval_scale.set_tooltip_text("Segundos entre capturas (5–300, de 5 en 5)")
+        self.interval_scale.set_tooltip_text("Segundos entre capturas (5–300, de 5 en 5; rueda = ±5 s)")
         bar.pack_start(self.interval_scale, True, True, 0)
         self.interval_label = Gtk.Label(label="")
         self.interval_label.set_width_chars(6)
@@ -963,7 +1173,7 @@ class ThumbSheet(Gtk.Window):
         self.tile_scale.set_round_digits(0)
         self.tile_scale.set_hexpand(True)
         self.tile_scale.set_value(tile)
-        self.tile_scale.set_tooltip_text("Ancho de cada tesela en píxeles (también Ctrl+rueda)")
+        self.tile_scale.set_tooltip_text("Ancho de cada tesela en píxeles (rueda = ±16 px; también Ctrl+rueda sobre el mosaico)")
         bar.pack_start(self.tile_scale, True, True, 0)
         self.tile_label = Gtk.Label(label="")
         self.tile_label.set_width_chars(7)
@@ -971,74 +1181,190 @@ class ThumbSheet(Gtk.Window):
         bar.pack_start(self.tile_label, False, False, 0)
 
         bar.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 6)
+
+        # derecha: [contador] [LLC] [Eliminar]
+        self.del_btn = Gtk.Button(label="Eliminar")
+        self.del_btn.get_style_context().add_class("destructive-action")
+        self.del_btn.set_tooltip_text("Borrar el archivo de vídeo del disco (sin papelera), tras confirmar")
+        self.del_btn.connect("clicked", self.on_delete)
+        bar.pack_end(self.del_btn, False, False, 0)
+        self.llc_btn = Gtk.Button(label="LLC")
+        self.llc_btn.set_tooltip_text("Guardar un proyecto de LosslessCut (<vídeo>-proj.llc, junto al vídeo) con un segmento "
+                                      "por cada racha de teselas seleccionadas")
+        self.llc_btn.connect("clicked", self.on_llc)
+        bar.pack_end(self.llc_btn, False, False, 0)
         self.status = Gtk.Label(label="")
         self.status.set_xalign(1.0)
         self.status.set_ellipsize(Pango.EllipsizeMode.START)
-        self.status.set_width_chars(22)
-        bar.pack_end(self.status, False, False, 0)
+        self.status.set_width_chars(24)
+        self.status.set_max_width_chars(46)   # los mensajes largos se recortan, no estrechan los sliders
+        bar.pack_end(self.status, False, False, 4)
 
+        # --- panel de ficheros + mosaico ---
+        self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
+        vbox.pack_start(self.paned, True, True, 0)
+        side = Gtk.ScrolledWindow()
+        side.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        side.set_size_request(140, -1)
+        self.listbox = Gtk.ListBox()
+        self.listbox.set_selection_mode(Gtk.SelectionMode.BROWSE)
+        self.listbox.connect("row-selected", self.on_row_selected)
+        side.add(self.listbox)
+        self.paned.pack1(side, False, False)
         self.scroller = Gtk.ScrolledWindow()
         self.scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.ALWAYS)
         self.sheet = Sheet()
         self.sheet.set_tile_w(tile)
+        self.sheet.on_selection_changed = self.on_selection_changed
         self.scroller.add(self.sheet)
-        vbox.pack_start(self.scroller, True, True, 0)
+        self.paned.pack2(self.scroller, True, False)
+        self.paned.set_position(int(self.settings.get("panel_w", 240)))
 
         self.interval_scale.connect("value-changed", self.on_interval_changed)
+        self.interval_scale.connect("scroll-event", self._slider_scroll, INTERVAL_STEP)
         self.tile_scale.connect("value-changed", self.on_tile_changed)
+        self.tile_scale.connect("scroll-event", self._slider_scroll, 16)
         self.scroller.connect("scroll-event", self.on_scroll)
         self.connect("key-press-event", self.on_key)
         self.connect("destroy", self.on_destroy)
         self.connect("window-state-event", self.on_window_state)
         self._maximized = bool(self.settings.get("maximized"))
+        # arrastrar y soltar vídeos sobre la ventana
+        self.drag_dest_set(Gtk.DestDefaults.ALL, [], Gdk.DragAction.COPY)
+        self.drag_dest_add_uri_targets()
+        self.connect("drag-data-received", self.on_drag_data)
         self._update_labels()
 
-        self.show_all()
-        self.open_video(video_path)
+        # sondeo de vídeos en un hilo (ffprobe), de uno en uno
+        self._probe_q = queue.Queue()
+        threading.Thread(target=self._probe_loop, name="ts-probe", daemon=True).start()
 
-    # --- vídeo ---
-    def open_video(self, path):
+        self.show_all()
+        self._load_current()
+        self.add_paths(video_paths)
+        if DEBUG:
+            GLib.timeout_add(1500, self._log_geometry)
+
+    def _log_geometry(self):
+        """Sólo con THUMBSHEET_DEBUG=1: coordenadas (relativas a la ventana) que usa el harness de pruebas."""
+        def origin(w):
+            pt = w.translate_coordinates(self, 0, 0)   # PyGObject devuelve (x, y) o (ok, x, y) según versión
+            return int(pt[-2]), int(pt[-1])
+
+        def center(w):
+            x, y = origin(w)
+            a = w.get_allocation()
+            return "%d,%d" % (x + a.width // 2, y + a.height // 2)
+        sx, sy = origin(self.sheet)
+        rows = ";".join(center(d.row) for d in self.docs if d.row is not None)
+        log("geometry: sheet=%d,%d cols=%d cell=%dx%d pad=%d gap=%d interval=%s tile=%s llc=%s del=%s rows=%s" % (
+            sx, sy, self.sheet.cols, self.sheet.cell_w, self.sheet.cell_h, Sheet.PAD, Sheet.GAP,
+            center(self.interval_scale), center(self.tile_scale), center(self.llc_btn), center(self.del_btn), rows))
+        return False
+
+    # ---- documentos --------------------------------------------------------------------------
+    def add_paths(self, paths):
+        first_new = None
+        for path in paths:
+            try:
+                rp = pathlib.Path(path).resolve()
+            except OSError:
+                continue
+            if not rp.is_file() or any(d.path == rp for d in self.docs):
+                continue
+            doc = Document(rp)
+            self.docs.append(doc)
+            doc.row = self._make_row(doc)
+            self.listbox.add(doc.row)
+            doc.row.show_all()
+            self._probe_q.put(doc)
+            first_new = first_new or doc
+        if first_new is not None and self.current is None:
+            self.listbox.select_row(first_new.row)
+
+    def _make_row(self, doc):
+        row = Gtk.ListBoxRow()
+        row.doc = doc
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        box.set_margin_start(8)
+        box.set_margin_end(8)
+        box.set_margin_top(5)
+        box.set_margin_bottom(5)
+        name = Gtk.Label(label=doc.path.name)
+        name.set_xalign(0.0)
+        name.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        name.set_tooltip_text(str(doc.path))
+        sub = Gtk.Label()
+        sub.set_xalign(0.0)
+        sub.get_style_context().add_class("dim-label")
+        sub.set_markup("<small>%s</small>" % GLib.markup_escape_text(doc.subtitle))
+        box.pack_start(name, False, False, 0)
+        box.pack_start(sub, False, False, 0)
+        row.add(box)
+        row.sub_label = sub
+        return row
+
+    def _probe_loop(self):
+        while True:
+            doc = self._probe_q.get()
+            doc.ensure_info()
+            GLib.idle_add(self._doc_probed, doc)
+
+    def _doc_probed(self, doc):
+        if doc.row is not None:
+            doc.row.sub_label.set_markup("<small>%s</small>" % GLib.markup_escape_text(doc.subtitle))
+        if doc is self.current:
+            self._load_current()
+        return False
+
+    def on_row_selected(self, listbox, row):
+        self.show_document(row.doc if row is not None else None)
+
+    def show_document(self, doc):
+        if doc is self.current:
+            return
+        if self.current is not None:
+            self.current.scroll = self.scroller.get_vadjustment().get_value()
         if self.generator:
             self.generator.cancel()
             self.generator = None
-        self.set_title("%s — %s" % (pathlib.Path(path).name, APP))
-        self.status.set_text("Analizando…")
-        try:
-            info = VideoInfo(path)
-        except (OSError, RuntimeError) as e:
-            self.status.set_text("Error")
-            dlg = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.ERROR,
-                                    buttons=Gtk.ButtonsType.CLOSE, text="No se pudo abrir el vídeo")
-            dlg.format_secondary_text("%s\n\n%s" % (path, e))
-            dlg.run()
-            dlg.destroy()
+        self.current = doc
+        self._load_current()
+
+    def _load_current(self):
+        doc = self.current
+        self.set_title("%s — %s" % (doc.path.name, APP) if doc else APP)
+        if doc is None or doc.info is None:
+            self.sheet.set_video(16.0 / 9.0, None, set())
+            self._progress = (0, 0)
+            self._refresh_status()
+            self._update_buttons()
             return
-        self.info = info
-        self.cache_dir = CACHE_ROOT / info.key
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        for leftover in self.cache_dir.glob(".*"):   # tramos/temporales de una ejecución interrumpida
-            if leftover.is_dir():
-                shutil.rmtree(str(leftover), ignore_errors=True)
-            else:
-                try:
-                    leftover.unlink()
-                except OSError:
-                    pass
-        self.sheet.set_video(info.aspect, self.cache_dir)
-        log("vídeo: %dx%d %s %.2ffps dur=%s gop=%s miniatura=%dx%d" % (
-            info.width, info.height, info.codec, info.fps, fmt_time(info.duration), info.gop, info.thumb_w, info.thumb_h))
+        self.sheet.set_video(doc.info.aspect, doc.cache_dir, doc.selected)
+        log("vídeo: %s %dx%d %s %.2ffps dur=%s gop=%s miniatura=%dx%d" % (
+            doc.path.name, doc.info.width, doc.info.height, doc.info.codec, doc.info.fps,
+            fmt_time(doc.info.duration), doc.info.gop, doc.info.thumb_w, doc.info.thumb_h))
         self.regenerate()
+        if doc.scroll:
+            GLib.timeout_add(60, self._restore_scroll, doc)
+        self._update_buttons()
+
+    def _restore_scroll(self, doc):
+        if doc is self.current:
+            self.scroller.get_vadjustment().set_value(doc.scroll)
+        return False
 
     def regenerate(self):
         self._regen_id = None
-        if not self.info:
+        doc = self.current
+        if not doc or not doc.info:
             return False
         if self.generator:
             self.generator.cancel()
         S = snap_interval(self.interval_scale.get_value())
         holder = []
         current = lambda: self.generator is holder[0]  # noqa: E731
-        gen = Generator(self.info, self.cache_dir, S, self.sheet.tile_ready,
+        gen = Generator(doc.info, doc.cache_dir, S, self.sheet.tile_ready,
                         lambda d, n: self.on_progress(d, n) if current() else False,
                         lambda: self.on_done() if current() else False)
         holder.append(gen)
@@ -1046,21 +1372,150 @@ class ThumbSheet(Gtk.Window):
         self.sheet.set_plan(gen.timestamps)
         self.scroller.get_vadjustment().set_value(0)
         gen.start()
+        self._refresh_status()
+        self._update_buttons()
         return False
 
-    # --- callbacks de generación ---
+    # ---- callbacks de generación ---------------------------------------------------------------
     def on_progress(self, done, total):
-        if self.generator and not self.generator.finished:
-            self.status.set_text("%d / %d capturas" % (min(done, total), total))
+        self._progress = (min(done, total), total)
+        self._refresh_status()
         return False
 
     def on_done(self):
-        if self.info and self.generator:
-            self.status.set_text("%d capturas · %s · %dx%d" % (
-                self.generator.total, fmt_time(self.info.duration), self.info.width, self.info.height))
+        self._refresh_status()
         return False
 
-    # --- controles ---
+    # ---- estado y botones ----------------------------------------------------------------------
+    def _segments(self):
+        doc = self.current
+        if not doc or not doc.info or not self.generator or not doc.selected:
+            return []
+        return selection_segments(doc.selected, self.generator.timestamps, self.generator.S, doc.info.duration)
+
+    def _refresh_status(self):
+        doc = self.current
+        if doc is None:
+            base = "Sin vídeos · Ctrl+O o arrastra aquí" if not self.docs else ""
+        elif doc.error:
+            base = "No se pudo abrir: %s" % doc.error
+        elif doc.info is None:
+            base = "Analizando…"
+        elif self.generator and not self.generator.finished:
+            base = "%d / %d capturas" % self._progress
+        else:
+            base = "%d capturas · %s · %dx%d" % (self.generator.total if self.generator else 0,
+                                                 fmt_time(doc.info.duration), doc.info.width, doc.info.height)
+        n = len(self._segments())
+        if n:
+            base += " · %d segmento%s" % (n, "" if n == 1 else "s")
+        self._status_base = base
+        if self._flash_id is None:
+            self.status.set_text(base)
+
+    def _flash(self, text):
+        if self._flash_id is not None:
+            GLib.source_remove(self._flash_id)
+        self.status.set_text(text)
+        self._flash_id = GLib.timeout_add(self.FLASH_MS, self._unflash)
+
+    def _unflash(self):
+        self._flash_id = None
+        self.status.set_text(self._status_base)
+        return False
+
+    def _update_buttons(self):
+        doc = self.current
+        self.del_btn.set_sensitive(doc is not None)
+        self.llc_btn.set_sensitive(bool(doc is not None and doc.info is not None and self._segments()))
+
+    def on_selection_changed(self):
+        if self.current is not None:
+            self.current.save_selection()
+        self._refresh_status()
+        self._update_buttons()
+
+    # ---- LLC ------------------------------------------------------------------------------------
+    def on_llc(self, *_):
+        doc = self.current
+        segs = self._segments()
+        if not doc or not segs:
+            return
+        proj = llc_project_path(doc.path)
+        if proj.exists():
+            dlg = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+                                    buttons=Gtk.ButtonsType.NONE, text="Ya existe un proyecto de LosslessCut para este vídeo")
+            dlg.format_secondary_text("%s\n\n¿Sobrescribirlo con los %d segmentos seleccionados?" % (proj.name, len(segs)))
+            dlg.add_button("_Cancelar", Gtk.ResponseType.CANCEL)
+            dlg.add_button("_Sobrescribir", Gtk.ResponseType.ACCEPT)
+            dlg.set_default_response(Gtk.ResponseType.CANCEL)
+            resp = dlg.run()
+            dlg.destroy()
+            if resp != Gtk.ResponseType.ACCEPT:
+                return
+        try:
+            write_llc_project(doc.path, segs)
+        except OSError as e:
+            self._error("No se pudo guardar el proyecto", "%s\n\n%s" % (proj, e))
+            return
+        self._flash("Guardado %s · %d segmento%s" % (proj.name, len(segs), "" if len(segs) == 1 else "s"))
+
+    # ---- eliminar -------------------------------------------------------------------------------
+    def on_delete(self, *_):
+        doc = self.current
+        if doc is None:
+            return
+        try:
+            size = human_size(doc.path.stat().st_size)
+        except OSError:
+            size = "?"
+        dlg = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.WARNING,
+                                buttons=Gtk.ButtonsType.NONE, text="¿Eliminar el archivo definitivamente?")
+        dlg.format_secondary_text("%s\n%s\n\nSe borra del disco directamente, sin papelera: no se puede deshacer." % (doc.path, size))
+        dlg.add_button("_Cancelar", Gtk.ResponseType.CANCEL)
+        btn = dlg.add_button("_Eliminar", Gtk.ResponseType.ACCEPT)
+        btn.get_style_context().add_class("destructive-action")
+        dlg.set_default_response(Gtk.ResponseType.CANCEL)
+        resp = dlg.run()
+        dlg.destroy()
+        if resp != Gtk.ResponseType.ACCEPT:
+            return
+        if self.generator:
+            self.generator.cancel()
+            self.generator = None
+        try:
+            os.remove(str(doc.path))
+        except OSError as e:
+            self._error("No se pudo eliminar el archivo", "%s\n\n%s" % (doc.path, e))
+            return
+        if doc.cache_dir:
+            shutil.rmtree(str(doc.cache_dir), ignore_errors=True)
+        self._remove_doc(doc)
+        self._flash("Eliminado %s" % doc.path.name)
+
+    def _remove_doc(self, doc):
+        idx = self.docs.index(doc)
+        self.docs.remove(doc)
+        row = doc.row
+        doc.row = None
+        if self.current is doc:
+            self.current = None
+        if row is not None:
+            self.listbox.remove(row)
+        if self.docs:
+            nxt = self.docs[min(idx, len(self.docs) - 1)]
+            self.listbox.select_row(nxt.row)
+        else:
+            self._load_current()
+
+    def _error(self, text, secondary):
+        dlg = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.ERROR,
+                                buttons=Gtk.ButtonsType.CLOSE, text=text)
+        dlg.format_secondary_text(secondary)
+        dlg.run()
+        dlg.destroy()
+
+    # ---- controles --------------------------------------------------------------------------------
     def _update_labels(self):
         self.interval_label.set_text("%d s" % snap_interval(self.interval_scale.get_value()))
         self.tile_label.set_text("%d px" % int(round(self.tile_scale.get_value())))
@@ -1080,25 +1535,45 @@ class ThumbSheet(Gtk.Window):
         self._update_labels()
         self.sheet.set_tile_w(int(round(scale.get_value())))
 
+    def _wheel_steps(self, event, key):
+        """Pasos de rueda (+1 arriba / -1 abajo); con scroll suave acumula hasta completar un paso."""
+        if event.direction == Gdk.ScrollDirection.UP:
+            return 1
+        if event.direction == Gdk.ScrollDirection.DOWN:
+            return -1
+        if event.direction == Gdk.ScrollDirection.SMOOTH:
+            _, dx, dy = event.get_scroll_deltas()
+            acc = self._wheel_acc.get(key, 0.0) + dy
+            if abs(acc) >= 1.0:
+                self._wheel_acc[key] = 0.0
+                return -1 if acc > 0 else 1
+            self._wheel_acc[key] = acc
+        return 0
+
+    def _slider_scroll(self, scale, event, step):
+        n = self._wheel_steps(event, scale)
+        if n:
+            scale.set_value(scale.get_value() + n * step)
+        return True
+
     def on_scroll(self, widget, event):
         if not event.state & Gdk.ModifierType.CONTROL_MASK:
             return False
-        step = 0
-        if event.direction == Gdk.ScrollDirection.UP:
-            step = 16
-        elif event.direction == Gdk.ScrollDirection.DOWN:
-            step = -16
-        elif event.direction == Gdk.ScrollDirection.SMOOTH:
-            ok, dx, dy = event.get_scroll_deltas()
-            step = -16 if dy > 0 else 16 if dy < 0 else 0
-        if step:
-            self.tile_scale.set_value(self.tile_scale.get_value() + step)
+        n = self._wheel_steps(event, "sheet")
+        if n:
+            self.tile_scale.set_value(self.tile_scale.get_value() + n * 16)
         return True
 
     def on_key(self, widget, event):
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
-        if event.keyval == Gdk.KEY_Escape or (ctrl and event.keyval in (Gdk.KEY_q, Gdk.KEY_w)):
+        if event.keyval == Gdk.KEY_Escape:
+            self.sheet.clear_selection()
+            return True
+        if ctrl and event.keyval in (Gdk.KEY_q, Gdk.KEY_w):
             self.destroy()
+            return True
+        if ctrl and event.keyval == Gdk.KEY_o:
+            self.add_paths(choose_videos(self))
             return True
         if ctrl and event.keyval in (Gdk.KEY_plus, Gdk.KEY_equal, Gdk.KEY_KP_Add):
             self.tile_scale.set_value(self.tile_scale.get_value() + 16)
@@ -1107,6 +1582,16 @@ class ThumbSheet(Gtk.Window):
             self.tile_scale.set_value(self.tile_scale.get_value() - 16)
             return True
         return False
+
+    def on_drag_data(self, widget, context, x, y, data, info, time_):
+        paths = []
+        for uri in data.get_uris() or []:
+            try:
+                paths.append(GLib.filename_from_uri(uri)[0])
+            except GLib.Error:
+                pass
+        self.add_paths(paths)
+        Gtk.drag_finish(context, bool(paths), False, time_)
 
     def on_window_state(self, widget, event):
         self._maximized = bool(event.new_window_state & Gdk.WindowState.MAXIMIZED)
@@ -1120,12 +1605,14 @@ class ThumbSheet(Gtk.Window):
             "interval": snap_interval(self.interval_scale.get_value()),
             "tile": int(round(self.tile_scale.get_value())),
             "win_w": w, "win_h": h, "maximized": self._maximized,
+            "panel_w": self.paned.get_position(),
         })
         Gtk.main_quit()
 
 
-def choose_video():
-    dlg = Gtk.FileChooserNative.new("Abrir vídeo", None, Gtk.FileChooserAction.OPEN, "Abrir", "Cancelar")
+def choose_videos(parent=None):
+    dlg = Gtk.FileChooserNative.new("Abrir vídeos", parent, Gtk.FileChooserAction.OPEN, "Abrir", "Cancelar")
+    dlg.set_select_multiple(True)
     flt = Gtk.FileFilter()
     flt.set_name("Vídeos")
     flt.add_mime_type("video/*")
@@ -1133,9 +1620,9 @@ def choose_video():
         flt.add_pattern("*" + ext)
     dlg.add_filter(flt)
     res = dlg.run()
-    path = dlg.get_filename() if res == Gtk.ResponseType.ACCEPT else None
+    paths = list(dlg.get_filenames() or []) if res == Gtk.ResponseType.ACCEPT else []
     dlg.destroy()
-    return path
+    return paths
 
 
 def main(argv):
@@ -1146,17 +1633,24 @@ def main(argv):
         if not shutil.which(tool):
             print("falta %s en el PATH (sudo apt install ffmpeg)" % tool, file=sys.stderr)
             return 2
-    path = argv[1] if len(argv) > 1 else None
-    if path and path.startswith("file://"):
-        path = GLib.filename_from_uri(path)[0]
-    if not path:
-        path = choose_video()
-        if not path:
+    paths = []
+    for arg in argv[1:]:
+        if arg.startswith("file://"):
+            try:
+                arg = GLib.filename_from_uri(arg)[0]
+            except GLib.Error:
+                continue
+        if os.path.isfile(arg):
+            paths.append(arg)
+        else:
+            print("no existe: %s" % arg, file=sys.stderr)
+    if not paths:
+        if len(argv) > 1:
+            return 2
+        paths = choose_videos()
+        if not paths:
             return 0
-    if not os.path.isfile(path):
-        print("no existe: %s" % path, file=sys.stderr)
-        return 2
-    win = ThumbSheet(path)
+    win = ThumbSheet(paths)
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         GLib.unix_signal_add(GLib.PRIORITY_HIGH, sig, lambda *_: (win.destroy(), False)[1])
     Gtk.main()

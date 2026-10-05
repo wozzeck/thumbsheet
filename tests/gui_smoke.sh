@@ -1,38 +1,76 @@
 #!/usr/bin/env bash
-# Humo de la GUI en un Xvfb propio: abre la app, mueve los sliders con xdotool, hace scroll y deja
-# capturas en el directorio de salida. No toca el DISPLAY real.
-# Uso: tests/gui_smoke.sh <vídeo> [dir_salida]
+# Humo de la GUI en un Xvfb propio (no toca el DISPLAY real): abre dos vídeos, mueve sliders (clic y rueda),
+# selecciona teselas (clic y arrastre), guarda el proyecto LLC, cambia de vídeo, Escape, Eliminar con
+# confirmación, Ctrl+Q; y comprueba que no quedan ffmpeg ni tras un SIGKILL en plena generación.
+# Uso: tests/gui_smoke.sh <vídeo A (se COPIA y la copia se borra)> <vídeo B (sólo lectura)> [dir_salida]
 set -euo pipefail
-VIDEO="$1"; OUT="${2:-/tmp/thumbsheet-gui}"; mkdir -p "$OUT"
+VIDEO_A="$1"; VIDEO_B="$2"; OUT="${3:-/tmp/thumbsheet-gui}"; mkdir -p "$OUT/video"
 DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 export DISPLAY=:77
 export XDG_CACHE_HOME="$OUT/cache" XDG_CONFIG_HOME="$OUT/config"   # no tocar la caché ni los ajustes reales
+rm -rf "$OUT/cache" "$OUT/config"
+COPY="$OUT/video/copia-$(basename "$VIDEO_A")"; cp -f "$VIDEO_A" "$COPY"
 Xvfb :77 -screen 0 1400x900x24 -nolisten tcp >/dev/null 2>&1 &
 XPID=$!
 trap 'kill $APP 2>/dev/null; kill $XPID 2>/dev/null' EXIT
 sleep 1
-THUMBSHEET_DEBUG=1 python3 "$DIR/thumbsheet.py" "$VIDEO" >"$OUT/app.log" 2>&1 &
+THUMBSHEET_DEBUG=1 python3 "$DIR/thumbsheet.py" "$COPY" "$VIDEO_B" >"$OUT/app.log" 2>&1 &
 APP=$!
 for i in $(seq 1 40); do WID=$(xdotool search --onlyvisible --classname thumbsheet 2>/dev/null | head -1 || true); [[ -n "$WID" ]] && break; sleep 0.25; done
 [[ -n "${WID:-}" ]] || { echo "no aparece la ventana"; cat "$OUT/app.log"; exit 1; }
 xdotool windowsize "$WID" 1400 900; xdotool windowmove "$WID" 0 0; sleep 0.3
 eval "$(xdotool getwindowgeometry --shell "$WID")"   # X Y WIDTH HEIGHT
 shot() { sleep "${2:-0.8}"; import -window root "$OUT/$1.png"; echo "captura $1"; }
+fail=0; ok() { echo "ok   $1"; }; ko() { echo "FAIL $1"; fail=1; }
 shot 1-inicial 4
-# barra: y≈22. Intervalo ocupa aprox. x∈[80,560], Tamaño x∈[680,1150] (ventana de 1400)
-xdotool mousemove $((X+700)) $((Y+22)) click 1; shot 2-teselas-pequenas 1.2     # tesela ~mínima
-xdotool mousemove $((X+1100)) $((Y+22)) click 1; shot 3-teselas-grandes 1.2     # tesela grande
-xdotool mousemove $((X+900)) $((Y+22)) click 1; sleep 0.5
-xdotool mousemove $((X+700)) $((Y+500)); for i in 1 2 3 4 5 6; do xdotool click 5; sleep 0.05; done; shot 4-scroll 1.2
-xdotool mousemove $((X+90)) $((Y+22)) click 1; shot 5-intervalo-minimo 6       # intervalo 5 s → regenera
-xdotool windowactivate --sync "$WID" 2>/dev/null || true; xdotool windowfocus --sync "$WID"; sleep 0.3; xdotool key Escape; sleep 1
-if kill -0 $APP 2>/dev/null; then echo "FALLO: la app no cerró con Escape"; kill $APP; sleep 1; else echo "cierre con Escape OK"; fi
-left=$(pgrep -c -f "ffmpeg -nostdin" || true); echo "ffmpeg vivos tras cerrar: $left"
-# segunda ronda: arrancar con intervalo denso, matar con SIGKILL en plena generación y comprobar huérfanos
-rm -rf "$OUT/cache"   # caché vacía: la segunda ronda tiene que generar de verdad
-THUMBSHEET_DEBUG=1 python3 "$DIR/thumbsheet.py" "$VIDEO" >"$OUT/app2.log" 2>&1 &
-APP=$!; sleep 2.5
-busy=$(pgrep -c -f "ffmpeg -nostdin" || true); kill -9 $APP; sleep 0.7
-left2=$(pgrep -c -f "ffmpeg -nostdin" || true); echo "SIGKILL en plena generación: ffmpeg antes=$busy después=$left2"
-echo "--- log"; cat "$OUT/app.log"
-echo "--- settings"; cat "$XDG_CONFIG_HOME/thumbsheet/settings.json" 2>/dev/null; echo
+# geometría publicada por la app (coordenadas relativas a la ventana)
+G=$(grep "geometry:" "$OUT/app.log" | tail -1 || true)
+[[ -n "$G" ]] || { echo "la app no publicó su geometría:"; cat "$OUT/app.log"; exit 1; }
+echo "$G"
+gv() { echo "$G" | sed -E "s/.* $1=([^ ]+).*/\1/"; }
+SX=$(gv sheet | cut -d, -f1); SY=$(gv sheet | cut -d, -f2); COLS=$(gv cols); CW=$(gv cell | cut -dx -f1); CH=$(gv cell | cut -dx -f2); PAD=$(gv pad); GAP=$(gv gap)
+tile() { local r=$1 c=$2; echo "$((X+SX+PAD+c*(CW+GAP)+CW/2)) $((Y+SY+PAD+r*(CH+GAP)+CH/2))"; }
+IX=$(gv interval | cut -d, -f1); IY=$(gv interval | cut -d, -f2); TX=$(gv tile | cut -d, -f1); TY=$(gv tile | cut -d, -f2)
+LX=$(gv llc | cut -d, -f1); LY=$(gv llc | cut -d, -f2); DX=$(gv del | cut -d, -f1); DY=$(gv del | cut -d, -f2)
+ROW1=$(gv rows | cut -d';' -f1); ROW2=$(gv rows | cut -d';' -f2)
+# rueda sobre el slider de intervalo: +5 s por paso
+xdotool mousemove $((X+IX)) $((Y+IY)) click 4 click 4; sleep 1.5
+grep -q "plan: S=40" "$OUT/app.log" && ok "rueda sobre intervalo: 30 → 40 s (dos pasos)" || ko "rueda sobre intervalo (log sin plan S=40)"
+# clic = toggle; arrastre = rango
+xdotool mousemove $(tile 0 1) click 1; shot 2-toggle 1
+xdotool mousemove $(tile 1 0) mousedown 1; sleep 0.1; for c in 1 2 3; do xdotool mousemove $(tile 1 $c); sleep 0.08; done; xdotool mouseup 1; shot 3-arrastre 1
+SEL="$OUT/cache/thumbsheet"; S1=$(cat "$SEL"/*/selection.json 2>/dev/null | head -1); echo "selección guardada: $S1"
+[[ "$S1" == "[40, 200, 240, 280, 320]" ]] && ok "selección = tesela (0,1)=40 s + fila 1 cols 0-3 = 200..320 s (S=40, 5 columnas)" || ko "selección inesperada: $S1"
+xdotool mousemove $(tile 0 1) click 1; sleep 0.5; S2=$(cat "$SEL"/*/selection.json 2>/dev/null | head -1)
+[[ "$S2" == "[200, 240, 280, 320]" ]] && ok "segundo clic deselecciona" || ko "toggle off falló: $S2"
+# LLC
+xdotool mousemove $((X+LX)) $((Y+LY)) click 1; sleep 1
+LLC="$OUT/video/copia-$(basename "${VIDEO_A%.*}")-proj.llc"
+if [[ -f "$LLC" ]]; then ok "proyecto LLC creado: $(basename "$LLC")"; cat "$LLC"; python3 -c "
+import json,sys; d=json.load(open(sys.argv[1])); assert d['version']==2 and d['cutSegments']==[{'start':200,'end':360,'name':''}], d" "$LLC" && ok "segmento 200–360 (4 teselas de 40 s)" || ko "contenido LLC inesperado"; else ko "no existe $LLC"; fi
+shot 4-llc 0.5
+# segundo vídeo y vuelta
+xdotool mousemove $((X+${ROW2%,*})) $((Y+${ROW2#*,})) click 1; shot 5-segundo-video 3
+xdotool mousemove $((X+${ROW1%,*})) $((Y+${ROW1#*,})) click 1; shot 6-vuelta 1.5
+# Escape limpia la selección
+xdotool windowfocus --sync "$WID"; sleep 0.2; xdotool key Escape; sleep 0.6
+[[ ! -f "$SEL"/*/selection.json ]] 2>/dev/null && ok "Escape limpia la selección" || { ls "$SEL"/*/selection.json 2>/dev/null | grep -q . && ko "Escape no limpió" || ok "Escape limpia la selección"; }
+# Eliminar con confirmación (Alt+E en el diálogo)
+xdotool mousemove $((X+DX)) $((Y+DY)) click 1; shot 7-dialogo-eliminar 1
+xdotool key alt+e; sleep 1.2
+[[ ! -f "$COPY" ]] && ok "archivo eliminado del disco" || ko "el archivo sigue existiendo"
+shot 8-tras-eliminar 1
+xdotool key ctrl+q; sleep 1
+if kill -0 $APP 2>/dev/null; then ko "la app no cerró con Ctrl+Q"; kill $APP; sleep 1; else ok "cierre con Ctrl+Q"; fi
+left=$(pgrep -c -f "ffmpeg -nostdin" || true); [[ "$left" == 0 ]] && ok "sin ffmpeg tras cerrar" || ko "ffmpeg vivos tras cerrar: $left"
+# SIGKILL en plena generación → sin huérfanos
+rm -rf "$OUT/cache"; cp -f "$VIDEO_A" "$COPY"
+python3 - "$OUT/config/thumbsheet/settings.json" <<'PY'
+import json, sys, pathlib; f = pathlib.Path(sys.argv[1]); d = json.loads(f.read_text()) if f.exists() else {}; d["interval"] = 5; f.parent.mkdir(parents=True, exist_ok=True); f.write_text(json.dumps(d))
+PY
+THUMBSHEET_DEBUG=1 python3 "$DIR/thumbsheet.py" "$COPY" >"$OUT/app2.log" 2>&1 &
+APP=$!; sleep 3
+busy=$(pgrep -c -f "ffmpeg -nostdin" || true); kill -9 $APP 2>/dev/null; sleep 0.7
+left2=$(pgrep -c -f "ffmpeg -nostdin" || true); [[ "$busy" -gt 0 && "$left2" == 0 ]] && ok "SIGKILL en plena generación: $busy ffmpeg → 0" || ko "SIGKILL: antes=$busy después=$left2"
+echo "--- log"; grep -v "^\[.*\] geometry" "$OUT/app.log" | tail -12
+echo "RESULTADO: $([[ $fail == 0 ]] && echo OK || echo FALLO)"; exit $fail

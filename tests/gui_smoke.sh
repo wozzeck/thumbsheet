@@ -33,6 +33,7 @@ SX=$(gv sheet | cut -d, -f1); SY=$(gv sheet | cut -d, -f2); COLS=$(gv cols); CW=
 tile() { local r=$1 c=$2; echo "$((X+SX+PAD+c*(CW+GAP)+CW/2)) $((Y+SY+PAD+r*(CH+GAP)+CH/2))"; }
 IX=$(gv interval | cut -d, -f1); IY=$(gv interval | cut -d, -f2); TX=$(gv tile | cut -d, -f1); TY=$(gv tile | cut -d, -f2)
 LX=$(gv llc | cut -d, -f1); LY=$(gv llc | cut -d, -f2); DX=$(gv del | cut -d, -f1); DY=$(gv del | cut -d, -f2)
+CX=$(gv cut | cut -d, -f1); CY=$(gv cut | cut -d, -f2)
 ROW1=$(gv rows | cut -d';' -f1); ROW2=$(gv rows | cut -d';' -f2)
 # rueda sobre el slider de intervalo: +5 s por paso
 xdotool mousemove $((X+IX)) $((Y+IY)) click 4 click 4; sleep 1.5
@@ -50,6 +51,13 @@ LLC="$OUT/video/copia-$(basename "${VIDEO_A%.*}")-proj.llc"
 if [[ -f "$LLC" ]]; then ok "proyecto LLC creado: $(basename "$LLC")"; cat "$LLC"; python3 -c "
 import json,sys; d=json.load(open(sys.argv[1])); assert d['version']==2 and d['cutSegments']==[{'start':200,'end':360,'name':''}], d" "$LLC" && ok "segmento 200–360 (4 teselas de 40 s)" || ko "contenido LLC inesperado"; else ko "no existe $LLC"; fi
 shot 4-llc 0.5
+# Cortar (sin pérdida): 200–360 se amplía a keyframes (GOP 6 s → 198–360) y se une en <copia>-cortado.mp4
+xdotool mousemove $((X+CX)) $((Y+CY)) click 1; shot 4a-dialogo-cortar 1; xdotool key Return
+for i in $(seq 1 60); do grep -q "cut: hecho\|cut: error" "$OUT/app.log" && break; sleep 0.5; done
+CUT="$OUT/video/copia-$(basename "${VIDEO_A%.*}")-cortado.mp4"
+if [[ -f "$CUT" ]]; then CD=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$CUT"); python3 -c "import sys; d=float(sys.argv[1]); sys.exit(0 if 160 <= d <= 166 else 1)" "$CD" && ok "corte sin pérdida: $(basename "$CUT") dura ${CD%.*} s (198–360 por keyframes)" || ko "duración del corte inesperada: $CD"; else ko "no existe $CUT: $(grep 'cut:' "$OUT/app.log" | tail -1)"; fi
+grep -q "cut: hecho" "$OUT/app.log" && ok "la app reporta el corte terminado y lo añade al panel" || ko "sin 'cut: hecho' en el log"
+shot 4a2-tras-cortar 0.8
 # cambiar el intervalo reajusta los segmentos hacia fuera a la nueva rejilla (y no los trocea)
 xdotool mousemove $((X+IX)) $((Y+IY)) click 5 click 5; sleep 1.5     # 40 → 30 s
 S3=$(cat "$SEL"/*/selection.json 2>/dev/null | head -1)

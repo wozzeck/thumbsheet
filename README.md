@@ -2,7 +2,7 @@
 
 Sábana de miniaturas de vídeo para Linux (GTK3). Abres uno o varios vídeos y aparece un mosaico con
 una captura cada N segundos. Controles: **Intervalo** (5–300 s), **Tamaño** de las teselas, y a la
-derecha del contador los botones **LLC** y **Eliminar**.
+derecha del contador los botones **Cortar**, **LLC** y **Eliminar**.
 
 ```
 thumbsheet vídeo.mp4 [otro.mkv ...]   # o "Abrir con" desde el gestor de archivos (admite varios)
@@ -33,6 +33,17 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   cada racha de teselas seleccionadas (del instante de la primera al de la última más el intervalo).
   Al abrir el vídeo en LosslessCut, los segmentos aparecen ya cargados. El fichero es JSON, válido
   para el LosslessCut actual (JSON5, esquema v2) y para versiones antiguas (YAML).
+- **Cortar**: corta los segmentos seleccionados y los une en `<vídeo>-cortado.mp4` (o `.mkv` si el
+  contenedor original no admite copia) junto al original, con un único ffmpeg (demuxer `concat` con
+  `inpoint`/`outpoint`, sin temporales). Dos modos:
+  - *Sin pérdida* (por defecto): copia los streams tal cual, así que sólo puede cortar en keyframes.
+    Cada borde se mueve **hacia fuera** al keyframe más cercano, de modo que nunca se pierde nada de lo
+    seleccionado aunque pueda sobrar algo (el aviso final dice cuánto). Los keyframes se localizan con
+    `ffprobe` leyendo sólo ventanas alrededor de cada borde, no el fichero entero. Tarda lo que tarde el
+    disco en copiar.
+  - *Exacto al fotograma*: recodifica (H.264 CRF 20 + AAC). Preciso, pero recomprime y es lento.
+  El progreso se ve en el contador, el botón pasa a "Cancelar" mientras dura, y el resultado se añade
+  al panel.
 - **Eliminar**: borra el archivo de vídeo del disco directamente, sin papelera, tras confirmar.
 
 El intervalo va **de 5 en 5** (5, 10, 15 … 300). Así todas las capturas caen en segundos múltiplos
@@ -120,7 +131,7 @@ Ajustes (intervalo, tamaño, ventana) se guardan en `~/.config/thumbsheet/settin
 
 - `thumbsheet.py` — todo: sondeo (`VideoInfo`), planificador y workers (`Generator`), GPU (`Gpu`),
   caché/cargador (`PixCache`, `Loader`), mosaico y selección (`Sheet`), vista ampliada y reproductor
-  (`Preview`, `PreviewLayer`, `Player`), segmentos y proyecto LLC
+  (`Preview`, `PreviewLayer`, `Player`), corte (`expand_to_keyframes`, `cut_command`), segmentos y proyecto LLC
   (`selection_segments`, `write_llc_project`), vídeo abierto (`Document`), ventana (`ThumbSheet`).
 - `thumbsheet` — lanzador; `thumbsheet.desktop` + `icon.svg` — entrada de menú; `install.sh`.
 - `tests/` — comprobaciones sin pantalla del generador (ver `tests/README.md`).

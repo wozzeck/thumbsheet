@@ -173,6 +173,7 @@ class VideoInfo(object):
         self.fps = 25.0
         self.rotated = False
         self.codec = "?"
+        self.has_audio = False
         self.gop = None                       # segundos entre keyframes (None = desconocido/enorme)
         self._probe()
         # tamaño de la miniatura guardada (par, lado mayor = THUMB_MAX, sin ampliar vídeos pequeños)
@@ -187,16 +188,19 @@ class VideoInfo(object):
         return h.hexdigest()[:16]
 
     def _probe(self):
-        cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_streams", "-show_format",
-               "-of", "json", str(self.path)]
+        cmd = ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(self.path)]
         r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=FF_ENV)
         if r.returncode != 0:
             raise RuntimeError(r.stderr.decode("utf-8", "replace").strip() or "ffprobe falló")
         data = json.loads(r.stdout.decode("utf-8", "replace") or "{}")
         streams = data.get("streams") or []
-        if not streams:
+        videos = [x for x in streams if x.get("codec_type") == "video"]
+        # la primera pista de vídeo que no sea una carátula incrustada
+        real = [x for x in videos if not (x.get("disposition") or {}).get("attached_pic")]
+        if not videos:
             raise RuntimeError("el fichero no tiene pista de vídeo")
-        s = streams[0]
+        s = (real or videos)[0]
+        self.has_audio = any(x.get("codec_type") == "audio" for x in streams)
         fmt = data.get("format") or {}
         self.codec = s.get("codec_name", "?")
         try:
@@ -1378,6 +1382,112 @@ def write_llc_project(video_path, segments):
 
 
 # ----------------------------------------------------------------------------------------------
+# cortar y unir los segmentos seleccionados (ffmpeg, demuxer concat con inpoint/outpoint)
+# ----------------------------------------------------------------------------------------------
+COPY_CONTAINERS = (".mp4", ".mkv", ".mov", ".m4v", ".webm")
+
+
+def cut_output_path(video_path):
+    video_path = pathlib.Path(video_path)
+    ext = video_path.suffix.lower() if video_path.suffix.lower() in COPY_CONTAINERS else ".mkv"
+    return video_path.with_name(video_path.stem + "-cortado" + ext)
+
+
+def keyframes_near(path, times, window):
+    """Instantes (s) de los keyframes de vídeo en las ventanas [t-window, t+window] de cada t. Sólo
+    demux (ffprobe -show_packets con -read_intervals): no decodifica ni lee el fichero entero."""
+    if not times:
+        return []
+    if window is None:
+        intervals = []
+    else:
+        intervals = ["%.3f%%%.3f" % (max(0.0, t - window), t + window) for t in sorted(set(times))]
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time,dts_time,flags",
+           "-of", "csv=p=0"]
+    if intervals:
+        cmd += ["-read_intervals", ",".join(intervals)]
+    cmd.append(str(path))
+    try:
+        out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=FF_ENV, timeout=600).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    kfs = set()
+    for line in out.decode("utf-8", "replace").splitlines():
+        parts = line.split(",")
+        if len(parts) >= 3 and "K" in parts[2]:
+            t = parts[0] if parts[0] not in ("", "N/A") else parts[1]
+            try:
+                kfs.add(float(t))
+            except ValueError:
+                pass
+    return sorted(kfs)
+
+
+def expand_to_keyframes(segments, path, duration, gop=None):
+    """Mueve cada borde HACIA FUERA al keyframe más cercano (inicio: el anterior o igual; fin: el siguiente o
+    igual) para que la copia de streams no pierda nada de lo seleccionado. Ventanas de búsqueda crecientes
+    y, como último recurso, un barrido completo."""
+    base = max(20.0, 2.0 * (gop or 10.0))
+    starts = [a for a, _ in segments]
+    ends = [b for _, b in segments]
+    kfs = []
+    for window in (base, base * 6, None):
+        kfs = keyframes_near(path, starts + ends, window)
+        ok = True
+        for a in starts:
+            if a > 0.05 and not any(k <= a + 1e-3 for k in kfs) and (window is None or a - window > 0):
+                ok = False
+        for b in ends:
+            if b < duration - 0.05 and not any(k >= b - 1e-3 for k in kfs) and (window is None or b + window < duration):
+                ok = False
+        if ok:
+            break
+    out = []
+    for a, b in segments:
+        before = [k for k in kfs if k <= a + 1e-3]
+        after = [k for k in kfs if k >= b - 1e-3]
+        na = max(before) if before else 0.0
+        nb = min(after) if after else float(duration)
+        out.append((na, min(nb, float(duration))))
+    return Selection._normalize(out)
+
+
+def write_concat_list(list_path, video_path, segments):
+    quoted = str(video_path).replace("'", "'\\''")
+    lines = ["ffconcat version 1.0"]
+    for a, b in segments:
+        lines += ["file '%s'" % quoted, "inpoint %.3f" % a, "outpoint %.3f" % b]
+    pathlib.Path(list_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def cut_command_copy(list_path, out_path):
+    """Sin pérdida: demuxer concat con inpoint/outpoint (en keyframes) y copia de streams."""
+    return FFMPEG + ["-progress", "pipe:1", "-nostats", "-f", "concat", "-safe", "0", "-i", str(list_path),
+                     "-map", "0:v:0", "-map", "0:a?", "-ignore_unknown", "-c", "copy", "-avoid_negative_ts", "make_zero",
+                     "-y", str(out_path)]
+
+
+def cut_command_exact(video_path, segments, out_path, has_audio):
+    """Exacto al fotograma: una entrada por segmento con seek exacto (-ss/-t antes de -i: sólo se decodifica
+    cada tramo desde su keyframe) y filtro concat; recodifica. El demuxer concat NO sirve aquí: al
+    recodificar no descarta los fotogramas entre el keyframe y el inpoint."""
+    cmd = FFMPEG + ["-progress", "pipe:1", "-nostats"]
+    for a, b in segments:
+        cmd += ["-ss", "%.3f" % a, "-t", "%.3f" % (b - a), "-i", str(video_path)]
+    n = len(segments)
+    if has_audio:
+        fc = "".join("[%d:v:0][%d:a:0]" % (i, i) for i in range(n)) + "concat=n=%d:v=1:a=1[v][a]" % n
+        maps = ["-map", "[v]", "-map", "[a]"]
+    else:
+        fc = "".join("[%d:v:0]" % i for i in range(n)) + "concat=n=%d:v=1:a=0[v]" % n
+        maps = ["-map", "[v]"]
+    cmd += ["-filter_complex", fc] + maps + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
+    if has_audio:
+        cmd += ["-c:a", "aac", "-b:a", "160k"]
+    return cmd + ["-y", str(out_path)]
+
+
+# ----------------------------------------------------------------------------------------------
 # documento = un vídeo abierto (sondeo, caché, selección, posición de scroll)
 # ----------------------------------------------------------------------------------------------
 class Document(object):
@@ -1544,10 +1654,16 @@ class ThumbSheet(Gtk.Window):
         self.del_btn.connect("clicked", self.on_delete)
         bar.pack_end(self.del_btn, False, False, 0)
         self.llc_btn = Gtk.Button(label="LLC")
+        self.cut_btn = Gtk.Button(label="Cortar")
+        self.cut_btn.set_tooltip_text("Cortar los segmentos seleccionados y unirlos en <vídeo>-cortado (sin pérdida, en keyframes; "
+                                      "o exacto recodificando)")
+        self.cut_btn.connect("clicked", self.on_cut)
+        self._cut = None
         self.llc_btn.set_tooltip_text("Guardar un proyecto de LosslessCut (<vídeo>-proj.llc, junto al vídeo) con un segmento "
                                       "por cada racha de teselas seleccionadas")
         self.llc_btn.connect("clicked", self.on_llc)
         bar.pack_end(self.llc_btn, False, False, 0)
+        bar.pack_end(self.cut_btn, False, False, 0)
         self.status = Gtk.Label(label="")
         self.status.set_xalign(1.0)
         self.status.set_ellipsize(Pango.EllipsizeMode.START)
@@ -1633,9 +1749,10 @@ class ThumbSheet(Gtk.Window):
             return "%d,%d" % (x + a.width // 2, y + a.height // 2)
         sx, sy = origin(self.sheet)
         rows = ";".join(center(d.row) for d in self.docs if d.row is not None)
-        log("geometry: sheet=%d,%d cols=%d cell=%dx%d pad=%d gap=%d interval=%s tile=%s llc=%s del=%s rows=%s" % (
+        log("geometry: sheet=%d,%d cols=%d cell=%dx%d pad=%d gap=%d interval=%s tile=%s llc=%s cut=%s del=%s rows=%s" % (
             sx, sy, self.sheet.cols, self.sheet.cell_w, self.sheet.cell_h, Sheet.PAD, Sheet.GAP,
-            center(self.interval_scale), center(self.tile_scale), center(self.llc_btn), center(self.del_btn), rows))
+            center(self.interval_scale), center(self.tile_scale), center(self.llc_btn), center(self.cut_btn),
+            center(self.del_btn), rows))
         return False
 
     # ---- documentos --------------------------------------------------------------------------
@@ -1805,8 +1922,11 @@ class ThumbSheet(Gtk.Window):
 
     def _update_buttons(self):
         doc = self.current
-        self.del_btn.set_sensitive(doc is not None)
-        self.llc_btn.set_sensitive(bool(doc is not None and doc.info is not None and self._segments()))
+        self.del_btn.set_sensitive(doc is not None and self._cut is None)
+        has_segs = bool(doc is not None and doc.info is not None and self._segments())
+        self.llc_btn.set_sensitive(has_segs)
+        self.cut_btn.set_sensitive(has_segs or self._cut is not None)
+        self.cut_btn.set_label("Cancelar" if self._cut is not None else "Cortar")
 
     # ---- selección (clic / arrastre sobre teselas → segmentos) ----------------------------------
     def _grid(self):
@@ -2078,6 +2198,161 @@ class ThumbSheet(Gtk.Window):
             self._error("No se pudo guardar el proyecto", "%s\n\n%s" % (proj, e))
             return
         self._flash("Guardado %s · %d segmento%s" % (proj.name, len(segs), "" if len(segs) == 1 else "s"))
+
+    # ---- cortar y unir ----------------------------------------------------------------------------
+    def on_cut(self, *_):
+        if self._cut is not None:
+            self._cut_cancel()
+            return
+        doc = self.current
+        segs = self._segments()
+        if not doc or not doc.info or not segs:
+            return
+        out = cut_output_path(doc.path)
+        total = sum(b - a for a, b in segs)
+        dlg = Gtk.Dialog(title="Cortar y unir", transient_for=self, modal=True)
+        dlg.add_button("_Cancelar", Gtk.ResponseType.CANCEL)
+        dlg.add_button("Cor_tar", Gtk.ResponseType.ACCEPT)
+        dlg.set_default_response(Gtk.ResponseType.ACCEPT)
+        box = dlg.get_content_area()
+        box.set_spacing(8)
+        for w in (box,):
+            w.set_margin_start(14)
+            w.set_margin_end(14)
+            w.set_margin_top(10)
+            w.set_margin_bottom(6)
+        head = Gtk.Label()
+        head.set_xalign(0.0)
+        head.set_markup("<b>%d segmento%s · %s</b>  →  %s" % (
+            len(segs), "" if len(segs) == 1 else "s", fmt_time(total), GLib.markup_escape_text(out.name)))
+        box.pack_start(head, False, False, 0)
+        lossless = Gtk.RadioButton.new_with_label(None, "Sin pérdida: copia los streams tal cual. Los cortes se mueven hacia fuera al "
+                                                        "keyframe más cercano (no se pierde nada; puede sobrar algo). Rápido.")
+        exact = Gtk.RadioButton.new_with_label_from_widget(lossless, "Exacto al fotograma: recodifica (H.264 CRF 20 + AAC). Lento, "
+                                                                     "recomprime.")
+        for rb in (lossless, exact):
+            rb.get_child().set_line_wrap(True)
+            rb.get_child().set_xalign(0.0)
+            box.pack_start(rb, False, False, 0)
+        if self.settings.get("cut_mode") == "exact":
+            exact.set_active(True)
+        if out.exists():
+            warn = Gtk.Label(label="Ya existe %s: se sobrescribirá." % out.name)
+            warn.set_xalign(0.0)
+            box.pack_start(warn, False, False, 0)
+        box.show_all()
+        resp = dlg.run()
+        use_exact = exact.get_active()
+        dlg.destroy()
+        if resp != Gtk.ResponseType.ACCEPT:
+            return
+        self.settings["cut_mode"] = "exact" if use_exact else "copy"
+        self._cut = {"doc": doc, "segments": list(segs), "out": out, "exact": use_exact, "proc": None,
+                     "cancel": threading.Event(), "expected": total}
+        self._update_buttons()
+        self.status.set_text("Analizando keyframes…" if not use_exact else "Preparando…")
+        threading.Thread(target=self._cut_worker, args=(self._cut,), name="ts-cut", daemon=True).start()
+
+    def _cut_worker(self, job):
+        doc, segs, out = job["doc"], job["segments"], job["out"]
+        try:
+            if job["exact"]:
+                final = segs
+            else:
+                final = expand_to_keyframes(segs, doc.path, doc.info.duration, doc.info.gop)
+            if job["cancel"].is_set():
+                return
+            job["final"] = final
+            job["expected"] = sum(b - a for a, b in final)
+            list_path = doc.cache_dir / ".cut-list.txt"
+            if job["exact"]:
+                cmd = cut_command_exact(doc.path, final, out, doc.info.has_audio)
+            else:
+                write_concat_list(list_path, doc.path, final)
+                cmd = cut_command_copy(list_path, out)
+            log("cut:", " ".join(cmd))
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=FF_ENV, preexec_fn=PREEXEC)
+            job["proc"] = p
+            if job["cancel"].is_set():
+                p.terminate()
+            for raw in p.stdout:
+                line = raw.decode("utf-8", "replace").strip()
+                if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
+                    try:
+                        done = int(line.split("=", 1)[1]) / 1e6
+                    except ValueError:
+                        continue
+                    GLib.idle_add(self._cut_progress, job, done)
+            err = p.stderr.read().decode("utf-8", "replace").strip()
+            p.wait()
+            if list_path.exists():
+                try:
+                    list_path.unlink()
+                except OSError:
+                    pass
+            if job["cancel"].is_set():
+                try:
+                    out.unlink()
+                except OSError:
+                    pass
+                GLib.idle_add(self._cut_done, job, None, "cancelado")
+                return
+            if p.returncode != 0 or not out.exists():
+                GLib.idle_add(self._cut_done, job, None, err[-400:] or ("ffmpeg terminó con código %s" % p.returncode))
+                return
+            dur = None
+            try:
+                r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(out)],
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=FF_ENV, timeout=60)
+                dur = float(r.stdout.decode().strip() or "nan")
+            except (OSError, ValueError, subprocess.TimeoutExpired):
+                pass
+            GLib.idle_add(self._cut_done, job, dur, None)
+        except Exception as e:  # noqa: BLE001
+            GLib.idle_add(self._cut_done, job, None, str(e))
+
+    def _cut_progress(self, job, done):
+        if self._cut is job and job["expected"] > 0:
+            pct = max(0, min(100, int(100 * done / job["expected"])))
+            self.status.set_text("Cortando… %d %%" % pct)
+        return False
+
+    def _cut_cancel(self):
+        job = self._cut
+        if job is None:
+            return
+        job["cancel"].set()
+        if job["proc"] is not None:
+            try:
+                job["proc"].terminate()
+            except OSError:
+                pass
+        self.status.set_text("Cancelando…")
+
+    def _cut_done(self, job, duration, error):
+        if self._cut is not job:
+            return False
+        self._cut = None
+        self._update_buttons()
+        self._refresh_status()
+        out = job["out"]
+        if error == "cancelado":
+            self._flash("Corte cancelado")
+            log("cut: cancelado")
+        elif error:
+            self._error("No se pudo cortar", "%s\n\n%s" % (out, error))
+            log("cut: error", error)
+        else:
+            added = job["expected"] - sum(b - a for a, b in job["segments"])
+            extra = " (+%.1f s por keyframes)" % added if added > 0.05 else ""
+            txt = "Guardado %s · %d segmento%s · %s%s" % (out.name, len(job["final"]), "" if len(job["final"]) == 1 else "s",
+                                                           fmt_time(duration if duration is not None else job["expected"]), extra)
+            if duration is not None and abs(duration - job["expected"]) > max(2.0, 0.03 * job["expected"]):
+                txt += " · duración inesperada"
+            self._flash(txt)
+            log("cut: hecho %s dur=%s esperado=%.2f" % (out.name, duration, job["expected"]))
+            self.add_paths([str(out)])
+        return False
 
     # ---- eliminar -------------------------------------------------------------------------------
     def on_delete(self, *_):

@@ -88,6 +88,18 @@ xdotool mousemove $((X+700)) $((Y+450)) click 1; sleep 0.5; shot 4d-vista-cerrad
 xdotool mousemove $(tile 0 2) click 3; sleep 0.8; xdotool windowfocus --sync "$WID"; xdotool key Escape; sleep 0.5
 S5=$(cat "$SEL"/*/selection.json 2>/dev/null | head -1)
 [[ "$S5" == '{"segments": [[200, 360]]}' ]] && ok "Esc cierra la vista ampliada sin tocar la selección" || ko "Esc sobre la vista alteró la selección: $S5"
+# Shift+clic: selecciona desde la última tesela pulsada (0,1)=40 s hasta (0,3)=120 s → 40–160
+xdotool mousemove $(tile 0 3) keydown shift click 1 keyup shift; sleep 0.5
+S6=$(cat "$SEL"/*/selection.json 2>/dev/null | head -1)
+[[ "$S6" == '{"segments": [[40, 160], [200, 360]]}' ]] && ok "Shift+clic selecciona el rango 40–160 (desde la última pulsada)" || ko "Shift+clic inesperado: $S6"
+# doble clic sobre una seleccionada: quita todo su tramo contiguo (200–360)
+xdotool mousemove $(tile 1 2) click --repeat 2 --delay 90 1; sleep 0.6
+S7=$(cat "$SEL"/*/selection.json 2>/dev/null | head -1)
+[[ "$S7" == '{"segments": [[40, 160]]}' ]] && ok "doble clic deselecciona el tramo contiguo 200–360" || ko "doble clic inesperado: $S7"
+# doble clic sobre una NO seleccionada: queda seleccionada (como un clic simple)
+xdotool mousemove $(tile 3 0) click --repeat 2 --delay 90 1; sleep 0.6
+S8=$(cat "$SEL"/*/selection.json 2>/dev/null | head -1)
+[[ "$S8" == '{"segments": [[40, 160], [600, 640]]}' ]] && ok "doble clic sobre no seleccionada: la deja seleccionada" || ko "doble clic (no sel.) inesperado: $S8"
 # segundo vídeo y vuelta
 xdotool mousemove $((X+${ROW2%,*})) $((Y+${ROW2#*,})) click 1; shot 5-segundo-video 3
 xdotool mousemove $((X+${ROW1%,*})) $((Y+${ROW1#*,})) click 1; shot 6-vuelta 1.5

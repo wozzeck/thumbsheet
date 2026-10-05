@@ -752,6 +752,7 @@ class Sheet(Gtk.DrawingArea):
         self.on_drag_end = None               # () -> None            : persistir / refrescar
         self.on_preview = None                # (t) -> None           : clic derecho = ampliar a ventana completa
         self._drag = None
+        self._anchor_t = None                 # última tesela pulsada con el botón izquierdo (para Shift+clic)
         self.connect("draw", self.on_draw)
         self.connect("size-allocate", lambda *_: self._relayout())
         self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK |
@@ -767,6 +768,7 @@ class Sheet(Gtk.DrawingArea):
         self.cache_dir = cache_dir
         self.selected = set()
         self._drag = None
+        self._anchor_t = None
         self.cache.clear()
         self.loader.cancel_all()
         self.set_plan([])
@@ -797,7 +799,42 @@ class Sheet(Gtk.DrawingArea):
             return len(self.ts) - 1 if loose else None
         return i
 
+    def _nearest_index(self, t):
+        if t is None or not self.ts:
+            return None
+        return min(range(len(self.ts)), key=lambda k: abs(self.ts[k] - t))
+
+    def _run_around(self, i):
+        """Índices del tramo contiguo de teselas seleccionadas que contiene a i."""
+        a = b = i
+        while a - 1 >= 0 and self.ts[a - 1] in self.selected:
+            a -= 1
+        while b + 1 < len(self.ts) and self.ts[b + 1] in self.selected:
+            b += 1
+        return a, b
+
+    def _oneshot(self, timestamps, mode):
+        """Operación de selección completa (instantánea + aplicar + fin) sin arrastre."""
+        self._drag = None
+        if self.on_drag_begin:
+            self.on_drag_begin()
+        if self.on_drag_apply:
+            self.on_drag_apply(timestamps, mode)
+        if self.on_drag_end:
+            self.on_drag_end()
+
     def on_press(self, widget, event):
+        if event.type == Gdk.EventType._2BUTTON_PRESS and event.button == 1:
+            # Doble clic. GTK ya entregó dos pulsaciones simples (alternar dos veces = como estaba). Si la
+            # tesela está seleccionada se quita TODO su tramo contiguo; si no, se deja seleccionada.
+            i = self._tile_at(event.x, event.y)
+            if i is not None:
+                if self.ts[i] in self.selected:
+                    a, b = self._run_around(i)
+                    self._oneshot([self.ts[k] for k in range(a, b + 1)], False)
+                else:
+                    self._oneshot([self.ts[i]], True)
+            return True
         if event.type != Gdk.EventType.BUTTON_PRESS:
             return event.button in (1, 3)
         if event.button == 3:
@@ -810,6 +847,13 @@ class Sheet(Gtk.DrawingArea):
         i = self._tile_at(event.x, event.y)
         if i is None:
             return False
+        anchor = self._nearest_index(self._anchor_t)
+        self._anchor_t = self.ts[i]
+        if event.state & Gdk.ModifierType.SHIFT_MASK and anchor is not None:
+            # Shift+clic: seleccionar todo entre la última tesela pulsada y esta
+            a, b = sorted((anchor, i))
+            self._oneshot([self.ts[k] for k in range(a, b + 1)], True)
+            return True
         self._drag = {"i0": i, "mode": self.ts[i] not in self.selected, "last": None}
         if self.on_drag_begin:
             self.on_drag_begin()

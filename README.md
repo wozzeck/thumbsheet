@@ -11,8 +11,10 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
 
 - **Varios vídeos**: se listan en el panel izquierdo (nombre, duración y resolución); clic para ver
   cada sábana. Se añaden más con `Ctrl+O` o arrastrándolos a la ventana.
-- **Selección**: clic = alternar una tesela; clic y arrastrar = aplicar a un rango contiguo. Las
-  seleccionadas se recuadran en rojo. `Esc` deselecciona todo. Lo que se guarda son **segmentos de
+- **Selección**: clic = alternar una tesela; clic y arrastrar = aplicar a un rango contiguo;
+  `Shift`+clic = seleccionar todo entre la última tesela pulsada y esta; doble clic sobre una
+  seleccionada = deseleccionar todo su tramo contiguo. Las seleccionadas se recuadran en rojo. `Esc`
+  deselecciona todo. Lo que se guarda son **segmentos de
   tiempo**, no teselas: una tesela está marcada si su tramo `[t, t+intervalo)` cae dentro de un
   segmento. Por eso al cambiar el intervalo la selección no se trocea: al afinarlo (10 → 5 s) las
   teselas intermedias aparecen marcadas; al engrosarlo (5 → 10 s) se ven marcadas las teselas que tocan

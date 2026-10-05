@@ -45,7 +45,7 @@ CACHE_ROOT = pathlib.Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / A
 CONFIG_FILE = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / APP / "settings.json"
 
 THUMB_MAX = int(os.environ.get("THUMBSHEET_THUMB_PX", "480"))     # lado mayor de la miniatura guardada
-INTERVAL_MIN, INTERVAL_MAX, INTERVAL_DEF = 5, 300, 30
+INTERVAL_MIN, INTERVAL_MAX, INTERVAL_DEF, INTERVAL_STEP = 5, 300, 30, 5
 TILE_MIN, TILE_MAX, TILE_DEF = 64, THUMB_MAX, 192
 PIX_BUDGET = int(os.environ.get("THUMBSHEET_PIX_MB", "64")) * 1024 * 1024
 DEBUG = os.environ.get("THUMBSHEET_DEBUG") == "1"
@@ -57,6 +57,48 @@ VIDEO_EXT = (".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".mpg", ".mpeg", "
 def log(*a):
     if DEBUG:
         print("[%s] %s" % (time.strftime("%H:%M:%S"), " ".join(str(x) for x in a)), file=sys.stderr, flush=True)
+
+
+def physical_cores():
+    """Núcleos físicos (sin SMT). Medido: más workers que núcleos reales no acorta nada y multiplica la CPU
+    gastada y la RAM (~70 MB por ffmpeg)."""
+    try:
+        seen = set()
+        for topo in pathlib.Path("/sys/devices/system/cpu").glob("cpu[0-9]*/topology"):
+            seen.add(((topo / "physical_package_id").read_text().strip(), (topo / "core_id").read_text().strip()))
+        if seen:
+            return len(seen)
+    except OSError:
+        pass
+    return os.cpu_count() or 2
+
+
+def mem_available_mb():
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError):
+        pass
+    return 4096
+
+
+def default_workers():
+    env = os.environ.get("THUMBSHEET_WORKERS")
+    if env and env.isdigit() and int(env) > 0:
+        return int(env)
+    n = physical_cores()
+    n = n - 1 if n >= 4 else n            # un núcleo libre para el escritorio y la propia interfaz
+    n = min(n, max(1, mem_available_mb() // 150))   # ~70 MB por ffmpeg, con margen
+    return max(1, min(16, n))
+
+
+def snap_interval(v):
+    """Intervalo válido: múltiplo de INTERVAL_STEP dentro de [INTERVAL_MIN, INTERVAL_MAX]. Así las capturas
+    de cualquier intervalo caen en segundos múltiplos de 5 y se reutilizan al cambiar de uno a otro."""
+    v = int(round(float(v) / INTERVAL_STEP)) * INTERVAL_STEP
+    return max(INTERVAL_MIN, min(INTERVAL_MAX, v))
 
 
 def fmt_time(t):
@@ -73,6 +115,10 @@ def _nice_prefix():
 
 
 NICE = _nice_prefix()
+# El ffmpeg de Ubuntu arrastra (por alguna librería enlazada) un pool OpenMP de un hilo por núcleo que
+# gira en sched_yield mientras el proceso vive, aunque se pida -threads 1. Medido: una captura de 0,1 s
+# de trabajo real costaba 1,5 s de CPU. Un solo hilo OMP y a dormir.
+FF_ENV = dict(os.environ, OMP_NUM_THREADS="1", OMP_WAIT_POLICY="passive")
 
 
 def _pdeathsig_preexec():
@@ -126,7 +172,7 @@ class VideoInfo(object):
     def _probe(self):
         cmd = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_streams", "-show_format",
                "-of", "json", str(self.path)]
-        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=FF_ENV)
         if r.returncode != 0:
             raise RuntimeError(r.stderr.decode("utf-8", "replace").strip() or "ffprobe falló")
         data = json.loads(r.stdout.decode("utf-8", "replace") or "{}")
@@ -193,7 +239,7 @@ class VideoInfo(object):
                "packet=pts_time,dts_time,flags", "-of", "csv=p=0", "-read_intervals", intervals,
                str(self.path)]
         try:
-            r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20)
+            r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=20, env=FF_ENV)
         except (OSError, subprocess.TimeoutExpired):
             return None
         gaps, prev = [], None
@@ -233,7 +279,7 @@ class Gpu(object):
         if cls._hwaccels is None:
             try:
                 out = subprocess.run(["ffmpeg", "-hide_banner", "-hwaccels"], stdout=subprocess.PIPE,
-                                     stderr=subprocess.DEVNULL, timeout=10).stdout.decode("utf-8", "replace")
+                                     stderr=subprocess.DEVNULL, timeout=10, env=FF_ENV).stdout.decode("utf-8", "replace")
             except (OSError, subprocess.TimeoutExpired):
                 out = ""
             cls._hwaccels = set(out.split())
@@ -268,7 +314,7 @@ class Gpu(object):
         ]
         try:
             for c in cmds:
-                r = subprocess.run(c, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60)
+                r = subprocess.run(c, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, timeout=60, env=FF_ENV)
                 if r.returncode != 0:
                     log("gpu selftest: ffmpeg falló:", r.stderr.decode("utf-8", "replace")[-200:])
                     return False
@@ -300,7 +346,7 @@ class Generator(object):
     def __init__(self, info, cache_dir, interval, on_tile, on_progress, on_done):
         self.info = info
         self.cache_dir = cache_dir
-        self.S = int(interval)
+        self.S = snap_interval(interval)
         self.on_tile, self.on_progress, self.on_done = on_tile, on_progress, on_done
         self.cancelled = threading.Event()
         self.lock = threading.Lock()
@@ -316,8 +362,7 @@ class Generator(object):
         D = info.duration
         self.timestamps = [t for t in range(0, int(math.floor(D)) + 1, self.S) if t <= D - 0.5] or [0]
         self.total = len(self.timestamps)
-        cpu = os.cpu_count() or 2
-        self.workers = max(1, min(32, cpu - 1 if cpu >= 4 else cpu))
+        self.workers = default_workers()
         gop = info.gop if info.gop is not None else max(400.0 / info.fps, 20.0)
         # coste por captura: seek ≈ decodificar GOP/2 + arranque (~1 s de vídeo equivalente); tramos ≈ S
         self.mode = "seek" if (gop / 2.0 + 1.0) < self.S else "range"
@@ -438,7 +483,7 @@ class Generator(object):
     def _run(self, cmd, timeout=None):
         if self.cancelled.is_set():
             return None
-        p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, preexec_fn=PREEXEC)
+        p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, preexec_fn=PREEXEC, env=FF_ENV)
         with self.lock:
             self.procs.add(p)
         return p
@@ -881,9 +926,8 @@ class ThumbSheet(Gtk.Window):
                     break
                 except GLib.Error:
                     pass
-        interval = int(self.settings.get("interval", INTERVAL_DEF))
+        interval = snap_interval(self.settings.get("interval", INTERVAL_DEF))
         tile = int(self.settings.get("tile", TILE_DEF))
-        interval = max(INTERVAL_MIN, min(INTERVAL_MAX, interval))
         tile = max(TILE_MIN, min(TILE_MAX, tile))
 
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
@@ -897,12 +941,14 @@ class ThumbSheet(Gtk.Window):
         vbox.pack_start(bar, False, False, 0)
 
         bar.pack_start(Gtk.Label(label="Intervalo"), False, False, 0)
-        self.interval_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, INTERVAL_MIN, INTERVAL_MAX, 1)
+        self.interval_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, INTERVAL_MIN, INTERVAL_MAX, INTERVAL_STEP)
         self.interval_scale.set_draw_value(False)
         self.interval_scale.set_round_digits(0)
+        for mark in (60, 120, 180, 240):
+            self.interval_scale.add_mark(mark, Gtk.PositionType.BOTTOM, None)
         self.interval_scale.set_hexpand(True)
         self.interval_scale.set_value(interval)
-        self.interval_scale.set_tooltip_text("Segundos entre capturas (5–300)")
+        self.interval_scale.set_tooltip_text("Segundos entre capturas (5–300, de 5 en 5)")
         bar.pack_start(self.interval_scale, True, True, 0)
         self.interval_label = Gtk.Label(label="")
         self.interval_label.set_width_chars(6)
@@ -989,7 +1035,7 @@ class ThumbSheet(Gtk.Window):
             return False
         if self.generator:
             self.generator.cancel()
-        S = int(round(self.interval_scale.get_value()))
+        S = snap_interval(self.interval_scale.get_value())
         holder = []
         current = lambda: self.generator is holder[0]  # noqa: E731
         gen = Generator(self.info, self.cache_dir, S, self.sheet.tile_ready,
@@ -1016,10 +1062,15 @@ class ThumbSheet(Gtk.Window):
 
     # --- controles ---
     def _update_labels(self):
-        self.interval_label.set_text("%d s" % int(round(self.interval_scale.get_value())))
+        self.interval_label.set_text("%d s" % snap_interval(self.interval_scale.get_value()))
         self.tile_label.set_text("%d px" % int(round(self.tile_scale.get_value())))
 
     def on_interval_changed(self, scale):
+        v = scale.get_value()
+        snapped = snap_interval(v)
+        if abs(v - snapped) > 1e-6:
+            scale.set_value(snapped)   # re-entra ya ajustado (clic en la pista, arrastre fino...)
+            return
         self._update_labels()
         if self._regen_id:
             GLib.source_remove(self._regen_id)
@@ -1066,7 +1117,7 @@ class ThumbSheet(Gtk.Window):
             self.generator.cancel()
         w, h = self.get_size()
         save_settings({
-            "interval": int(round(self.interval_scale.get_value())),
+            "interval": snap_interval(self.interval_scale.get_value()),
             "tile": int(round(self.tile_scale.get_value())),
             "win_w": w, "win_h": h, "maximized": self._maximized,
         })

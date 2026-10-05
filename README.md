@@ -8,6 +8,10 @@ thumbsheet vídeo.mp4        # o doble clic / "Abrir con" desde el gestor de arc
 thumbsheet                  # sin argumento: diálogo para elegir el vídeo
 ```
 
+El intervalo va **de 5 en 5** (5, 10, 15 … 300). Así todas las capturas caen en segundos múltiplos
+de 5 y se conservan al cambiar el intervalo: pasar de 30 s a 60 s no genera nada, y de 30 s a 10 s
+sólo genera los dos tercios que faltan. Lo ya generado no se tira nunca (vive en la caché de disco).
+
 Atajos: `Ctrl+rueda` o `Ctrl +/-` cambian el tamaño de tesela; `Esc` / `Ctrl+Q` cierran.
 
 ## Instalación (Ubuntu / Mint / Debian)
@@ -27,7 +31,17 @@ Broadwell+), `i965-va-driver` (Intel más antiguos) o `mesa-va-drivers` (AMD).
 
 - **ffmpeg hace el trabajo** en procesos con `nice 10` + `ionice` best-effort: aprovecha toda la CPU
   libre pero cede ante el escritorio y cualquier otra cosa interactiva. Al cerrar la ventana o mover
-  el slider de intervalo se matan los ffmpeg en marcha.
+  el slider de intervalo se matan los ffmpeg en marcha (y mueren con la app aunque la maten a ella).
+- **Un worker por núcleo físico menos uno**, con tope por memoria disponible (~70 MB por ffmpeg).
+  Medido: con 4 workers el paralelo ya satura la memoria/caché de la máquina; 19 workers sólo rascan
+  un 15 % más de velocidad a cambio del triple de CPU y RAM. `THUMBSHEET_WORKERS=n` lo fuerza.
+- **`OMP_NUM_THREADS=1` para cada ffmpeg.** El ffmpeg de Ubuntu arrastra un pool OpenMP de un hilo
+  por núcleo que gira en `sched_yield` mientras el proceso vive, aunque se pida `-threads 1`:
+  una captura de 0,1 s de trabajo real costaba 1,5 s de CPU (medido con `strace -c`: 20.000
+  `sched_yield`). Con la variable, 0,13 s. No cambia el tiempo de reloj de una captura suelta, pero
+  deja de calentar el equipo y de pisar a los demás workers.
+- La **resolución de la miniatura no influye** en el tiempo (480 px y 160 px cuestan lo mismo):
+  manda decodificar el vídeo a su resolución nativa, que no se puede evitar.
 - **Dos estrategias según el vídeo**, elegidas midiendo el intervalo entre keyframes (GOP) con
   ffprobe sin decodificar nada:
   - *seek*: una búsqueda exacta por captura (`-ss` antes de `-i`), en paralelo, con `-threads 1` por
@@ -48,14 +62,17 @@ Broadwell+), `i965-va-driver` (Intel más antiguos) o `mesa-va-drivers` (AMD).
   de tamaño reescala con cairo lo que ya está en memoria y, al soltarlo, redecodifica al tamaño
   final. Sin WebKit ni proceso web.
 
-Medido en un i7-13700H con una grabación de Teams de 24 min (1080p, 16 fps, GOP 6 s):
-intervalo 60 s → 24 capturas en 0,4 s; intervalo 5 s → 287 capturas en ~10 s.
+Medido en un i7-13700H (portátil) con una grabación de Teams de 24 min (1080p, 16 fps, GOP 6 s):
+intervalo 60 s → 24 capturas en 0,4 s; intervalo 5 s → 287 capturas en 11–12 s con 4 a 13 workers.
+Una captura suelta cuesta 0,12 s de reloj y 0,13 s de CPU; la GPU por captura cuesta 0,23 s (la
+inicialización de VAAPI), por eso sólo se usa en el modo tramos.
 
 ## Variables de entorno
 
 | Variable | Efecto |
 |---|---|
 | `THUMBSHEET_HWACCEL=0` | no usar GPU |
+| `THUMBSHEET_WORKERS=4` | número de ffmpeg en paralelo (por defecto: núcleos físicos − 1, con tope por RAM) |
 | `THUMBSHEET_THUMB_PX=320` | lado mayor de la miniatura guardada (por defecto 480; cambia la huella de caché) |
 | `THUMBSHEET_PIX_MB=32` | presupuesto de la caché de miniaturas decodificadas en memoria |
 | `THUMBSHEET_DEBUG=1` | traza en stderr: plan elegido, GPU, tiempos |

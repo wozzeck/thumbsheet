@@ -8,6 +8,7 @@ VIDEO_A="$1"; VIDEO_B="$2"; OUT="${3:-/tmp/thumbsheet-gui}"; mkdir -p "$OUT/vide
 DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 export DISPLAY=:77
 export XDG_CACHE_HOME="$OUT/cache" XDG_CONFIG_HOME="$OUT/config"   # no tocar la caché ni los ajustes reales
+export THUMBSHEET_AUDIO=0    # la prueba de reproducción no debe sonar por los altavoces
 rm -rf "$OUT/cache" "$OUT/config"
 COPY="$OUT/video/copia-$(basename "$VIDEO_A")"; cp -f "$VIDEO_A" "$COPY"
 Xvfb :77 -screen 0 1400x900x24 -nolisten tcp >/dev/null 2>&1 &
@@ -66,6 +67,15 @@ xdotool windowfocus --sync "$WID"; xdotool key Right; sleep 0.9; shot 4c2-flecha
 [[ -f "$SEL"/*/full/120.jpg ]] 2>/dev/null || ls "$SEL"/*/full/120.jpg >/dev/null 2>&1 && ok "flecha derecha: fotograma 2:00 (120 s) extraído" || ko "flecha derecha: falta full/120.jpg"
 xdotool key Left key Left; sleep 0.9
 ls "$SEL"/*/full/40.jpg >/dev/null 2>&1 && ok "dos flechas izquierda: fotograma 0:40 extraído" || ko "flecha izquierda: falta full/40.jpg"
+# reproducción GStreamer: espacio arranca desde el fotograma (0:40), 2,5 s después pausa; flecha derecha salta +S
+xdotool key space; sleep 3; shot 4e-reproduciendo 0.2; xdotool key space; sleep 0.6
+P=$(grep -o "player: pausa en [0-9.]*" "$OUT/app.log" | tail -1 | awk '{print $4}')
+python3 -c "import sys; p=float(sys.argv[1]); sys.exit(0 if 41.5 <= p <= 46 else 1)" "${P:-0}" && ok "play desde 0:40 y pausa ~3 s después (pos=$P)" || ko "posición tras reproducir inesperada: '$P'"
+xdotool key Right; sleep 0.8
+grep -q "player: seek a 8[0-9]\." "$OUT/app.log" && ok "flecha derecha con vídeo: seek +40 s (~1:20)" || ko "no hubo seek a ~80 s: $(grep 'player: seek' "$OUT/app.log" | tail -1)"
+shot 4f-pausado-tras-seek 0.8
+xdotool key Escape; sleep 0.5
+xdotool mousemove $(tile 0 2) click 3; sleep 0.8     # reabrir la vista en modo fotograma para el resto de pasos
 xdotool mousemove $((X+700)) $((Y+450)) click 1; sleep 0.5; shot 4d-vista-cerrada 0.3
 xdotool mousemove $(tile 0 2) click 3; sleep 0.8; xdotool windowfocus --sync "$WID"; xdotool key Escape; sleep 0.5
 S5=$(cat "$SEL"/*/selection.json 2>/dev/null | head -1)
@@ -83,7 +93,7 @@ xdotool key alt+e; sleep 1.2
 shot 8-tras-eliminar 1
 xdotool key ctrl+q; sleep 1
 if kill -0 $APP 2>/dev/null; then ko "la app no cerró con Ctrl+Q"; kill $APP; sleep 1; else ok "cierre con Ctrl+Q"; fi
-left=$(pgrep -c -f "ffmpeg -nostdin" || true); [[ "$left" == 0 ]] && ok "sin ffmpeg tras cerrar" || ko "ffmpeg vivos tras cerrar: $left"
+left=$(pgrep -c -x ffmpeg || true); [[ "$left" == 0 ]] && ok "sin ffmpeg tras cerrar" || ko "ffmpeg vivos tras cerrar: $left"
 # SIGKILL en plena generación → sin huérfanos
 rm -rf "$OUT/cache"; cp -f "$VIDEO_A" "$COPY"
 python3 - "$OUT/config/thumbsheet/settings.json" <<'PY'
@@ -91,7 +101,7 @@ import json, sys, pathlib; f = pathlib.Path(sys.argv[1]); d = json.loads(f.read_
 PY
 THUMBSHEET_DEBUG=1 python3 "$DIR/thumbsheet.py" "$COPY" >"$OUT/app2.log" 2>&1 &
 APP=$!; sleep 3
-busy=$(pgrep -c -f "ffmpeg -nostdin" || true); kill -9 $APP 2>/dev/null; sleep 0.7
-left2=$(pgrep -c -f "ffmpeg -nostdin" || true); [[ "$busy" -gt 0 && "$left2" == 0 ]] && ok "SIGKILL en plena generación: $busy ffmpeg → 0" || ko "SIGKILL: antes=$busy después=$left2"
+busy=$(pgrep -c -x ffmpeg || true); kill -9 $APP 2>/dev/null; sleep 1.5   # SIGTERM por PDEATHSIG: ffmpeg termina limpio, no instantáneo
+left2=$(pgrep -c -x ffmpeg || true); [[ "$busy" -gt 0 && "$left2" == 0 ]] && ok "SIGKILL en plena generación: $busy ffmpeg → 0" || ko "SIGKILL: antes=$busy después=$left2"
 echo "--- log"; grep -v "^\[.*\] geometry" "$OUT/app.log" | tail -12
 echo "RESULTADO: $([[ $fail == 0 ]] && echo OK || echo FALLO)"; exit $fail

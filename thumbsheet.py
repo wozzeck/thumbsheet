@@ -39,6 +39,15 @@ gi.require_version("PangoCairo", "1.0")
 import cairo  # noqa: E402
 from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango, PangoCairo  # noqa: E402
 
+try:   # reproducción en la vista ampliada (opcional): gir1.2-gstreamer-1.0 + gstreamer1.0-gtk3 + gstreamer1.0-libav
+    gi.require_version("Gst", "1.0")
+    from gi.repository import Gst  # noqa: E402
+    HAVE_GST = True
+except (ValueError, ImportError):
+    Gst = None
+    HAVE_GST = False
+_GST_READY = False
+
 APP = "thumbsheet"
 APP_DIR = pathlib.Path(__file__).resolve().parent
 HOME = pathlib.Path.home()
@@ -122,11 +131,17 @@ NICE = _nice_prefix()
 FF_ENV = dict(os.environ, OMP_NUM_THREADS="1", OMP_WAIT_POLICY="passive")
 
 
+_APP_PID = os.getpid()
+
+
 def _pdeathsig_preexec():
     """Se ejecuta en el hijo justo antes del exec: pide al kernel que le mande SIGTERM si el padre
-    (esta app) muere, sea como sea. El exec de nice/ionice/ffmpeg lo conserva."""
+    (esta app) muere, sea como sea. El exec de nice/ionice/ffmpeg lo conserva. Si el padre ya murió
+    entre el fork y este prctl (carrera clásica de PDEATHSIG), el hijo se va directamente."""
     try:
         _LIBC.prctl(1, signal.SIGTERM, 0, 0, 0)   # PR_SET_PDEATHSIG = 1
+        if os.getppid() != _APP_PID:
+            os._exit(0)
     except Exception:  # noqa: BLE001
         pass
 
@@ -1041,6 +1056,227 @@ class Preview(Gtk.DrawingArea):
         return False
 
 
+class Player(object):
+    """playbin + gtksink embebido en la capa de la vista ampliada. Los avisos del bus llegan en el hilo GTK
+    (add_signal_watch) y se reparten por callbacks: on_state(playing), on_eos(), on_error(mensaje)."""
+
+    FLAG_AUDIO = 1 << 1   # GST_PLAY_FLAG_AUDIO
+
+    def __init__(self, audio=True):
+        global _GST_READY
+        if not HAVE_GST:
+            raise RuntimeError("GStreamer no disponible")
+        if not _GST_READY:
+            Gst.init(None)
+            _GST_READY = True
+        self.playbin = Gst.ElementFactory.make("playbin", None)
+        sink = Gst.ElementFactory.make("gtksink", None)
+        if self.playbin is None or sink is None:
+            raise RuntimeError("faltan playbin o gtksink (gstreamer1.0-plugins-base, gstreamer1.0-gtk3)")
+        self.widget = sink.props.widget
+        self.playbin.set_property("video-sink", sink)
+        self.audio = True
+        if not audio:
+            self._disable_audio()
+        self.loaded_path = None
+        self.want_play = False
+        self._pending = None          # (segundo de arranque, reproducir) hasta que el pipeline haga preroll
+        self._prerolled = False
+        self.on_state = self.on_eos = self.on_error = None
+        bus = self.playbin.get_bus()
+        bus.add_signal_watch()
+        bus.connect("message", self._on_message)
+
+    def _disable_audio(self):
+        self.audio = False
+        self.playbin.set_property("flags", self.playbin.get_property("flags") & ~self.FLAG_AUDIO)
+
+    def load(self, path, start_s, play):
+        self.playbin.set_state(Gst.State.NULL)
+        self.playbin.set_property("uri", pathlib.Path(path).as_uri())
+        self.loaded_path = pathlib.Path(path)
+        self.want_play = play
+        self._pending = (start_s, play)
+        self._prerolled = False
+        self.playbin.set_state(Gst.State.PAUSED)
+
+    def _on_message(self, bus, msg):
+        t = msg.type
+        if t == Gst.MessageType.ASYNC_DONE:
+            if not self._prerolled:
+                self._prerolled = True
+                start_s, play = self._pending or (None, False)
+                self._pending = None
+                if start_s is not None:
+                    self.seek(start_s)
+                if play:
+                    self.playbin.set_state(Gst.State.PLAYING)
+        elif t == Gst.MessageType.STATE_CHANGED and msg.src is self.playbin:
+            _old, new, _pending = msg.parse_state_changed()
+            if self.on_state:
+                self.on_state(new == Gst.State.PLAYING)
+        elif t == Gst.MessageType.EOS:
+            self.want_play = False
+            self.playbin.set_state(Gst.State.PAUSED)
+            if self.on_eos:
+                self.on_eos()
+        elif t == Gst.MessageType.ERROR:
+            err, dbg = msg.parse_error()
+            factory = msg.src.get_factory() if msg.src is not None else None
+            klass = (factory.get_metadata("klass") or "") if factory else ""
+            log("player: error [%s/%s] %s | %s" % (msg.src.get_name() if msg.src else "?", klass, err.message, dbg))
+            if self.audio and "Audio" in klass and self.loaded_path is not None:
+                # sin dispositivo de sonido utilizable: seguir en silencio desde donde estábamos
+                pos = self.position() or (self._pending[0] if self._pending else 0.0)
+                path, play = self.loaded_path, self.want_play
+                self._disable_audio()
+                self.load(path, pos, play)
+                return
+            if self.on_error:
+                self.on_error(err.message)
+
+    def seek(self, s):
+        return self.playbin.seek_simple(Gst.Format.TIME, Gst.SeekFlags.FLUSH | Gst.SeekFlags.ACCURATE,
+                                        max(0, int(float(s) * Gst.SECOND)))
+
+    def play(self):
+        self.want_play = True
+        self.playbin.set_state(Gst.State.PLAYING)
+
+    def pause(self):
+        self.want_play = False
+        self.playbin.set_state(Gst.State.PAUSED)
+
+    def stop(self):
+        self.want_play = False
+        self.loaded_path = None
+        self._pending = None
+        self.playbin.set_state(Gst.State.NULL)
+
+    def position(self):
+        ok, pos = self.playbin.query_position(Gst.Format.TIME)
+        return pos / float(Gst.SECOND) if ok and pos >= 0 else None
+
+    def is_playing(self):
+        _ok, state, pending = self.playbin.get_state(0)
+        target = pending if pending != Gst.State.VOID_PENDING else state
+        return target == Gst.State.PLAYING
+
+
+class PreviewLayer(Gtk.Box):
+    """Capa de la vista ampliada: arriba el fotograma fijo o el vídeo; abajo play/pausa, barra de progreso
+    (arrastrable: hace de scrubber), tiempo y cerrar."""
+
+    def __init__(self):
+        super(PreviewLayer, self).__init__(orientation=Gtk.Orientation.VERTICAL)
+        self.on_close = None
+        self.on_toggle_play = None
+        self.on_seek = None
+        self.duration = 1.0
+        self._dragging = False
+        self._updating = False
+        self.stack = Gtk.Stack()
+        self.stack.set_homogeneous(True)
+        self.still = Preview()
+        self.still.set_no_show_all(False)   # Preview nace con no_show_all (era la capa entera); aquí es un hijo normal
+        self.still.on_close = lambda: self.on_close() if self.on_close else None
+        self.stack.add_named(self.still, "still")
+        self.video_box = Gtk.EventBox()
+        self.video_box.get_style_context().add_class("ts-black")
+        self.video_box.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        self.video_box.connect("button-press-event", lambda w, e: (self.on_toggle_play() if self.on_toggle_play else None) or True)
+        self.stack.add_named(self.video_box, "video")
+        self.pack_start(self.stack, True, True, 0)
+
+        bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
+        bar.get_style_context().add_class("ts-preview-bar")
+        self.play_btn = Gtk.Button()
+        self.play_icon = Gtk.Image.new_from_icon_name("media-playback-start-symbolic", Gtk.IconSize.BUTTON)
+        self.play_btn.add(self.play_icon)
+        self.play_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self.play_btn.set_tooltip_text("Reproducir / pausar (espacio). Flechas: ±intervalo")
+        self.play_btn.connect("clicked", lambda *_: self.on_toggle_play() if self.on_toggle_play else None)
+        bar.pack_start(self.play_btn, False, False, 0)
+        self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 0.1)
+        self.scale.set_draw_value(False)
+        self.scale.set_hexpand(True)
+        self.scale.connect("button-press-event", self._scrub_begin)
+        self.scale.connect("button-release-event", self._scrub_end)
+        self.scale.connect("value-changed", self._on_value)
+        bar.pack_start(self.scale, True, True, 0)
+        self.time_label = Gtk.Label(label="")
+        self.time_label.set_width_chars(15)
+        self.time_label.set_xalign(1.0)
+        bar.pack_start(self.time_label, False, False, 0)
+        self.close_btn = Gtk.Button()
+        self.close_btn.add(Gtk.Image.new_from_icon_name("window-close-symbolic", Gtk.IconSize.BUTTON))
+        self.close_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self.close_btn.set_tooltip_text("Cerrar (Esc)")
+        self.close_btn.connect("clicked", lambda *_: self.on_close() if self.on_close else None)
+        bar.pack_start(self.close_btn, False, False, 0)
+        self.pack_start(bar, False, False, 0)
+
+        self.set_halign(Gtk.Align.FILL)
+        self.set_valign(Gtk.Align.FILL)
+        self.show_all()
+        self.hide()
+        self.set_no_show_all(True)
+
+    @property
+    def dragging(self):
+        return self._dragging
+
+    def show_still(self, pixbuf, t, label):
+        self.still.set_frame(pixbuf, t, label)
+        self.stack.set_visible_child_name("still")
+        self.set_playing(False)
+
+    def show_video(self):
+        self.stack.set_visible_child_name("video")
+
+    def attach_video(self, widget):
+        self.video_box.add(widget)
+        widget.show()
+
+    def set_duration(self, d):
+        self.duration = max(0.1, float(d))
+        self._updating = True
+        self.scale.set_range(0, self.duration)
+        self._updating = False
+
+    def set_position(self, s):
+        if self._dragging:
+            return
+        self._updating = True
+        self.scale.set_value(max(0.0, min(self.duration, float(s))))
+        self._updating = False
+        self._label(s)
+
+    def _label(self, s):
+        self.time_label.set_text("%s / %s" % (fmt_time(s), fmt_time(self.duration)))
+
+    def set_playing(self, playing):
+        self.play_icon.set_from_icon_name("media-playback-pause-symbolic" if playing else "media-playback-start-symbolic",
+                                          Gtk.IconSize.BUTTON)
+
+    def _scrub_begin(self, widget, event):
+        self._dragging = True
+        return False
+
+    def _scrub_end(self, widget, event):
+        self._dragging = False
+        if self.on_seek:
+            self.on_seek(self.scale.get_value())
+        return False
+
+    def _on_value(self, scale):
+        if self._updating:
+            return
+        self._label(scale.get_value())
+        if self.on_seek:
+            self.on_seek(scale.get_value())
+
+
 # ----------------------------------------------------------------------------------------------
 # selección → segmentos → proyecto de LosslessCut
 # ----------------------------------------------------------------------------------------------
@@ -1324,10 +1560,16 @@ class ThumbSheet(Gtk.Window):
         vbox.pack_start(self.overlay, True, True, 0)
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self.overlay.add(self.paned)
-        self.preview = Preview()
-        self.preview.on_close = self.hide_preview
-        self.overlay.add_overlay(self.preview)
+        self.layer = PreviewLayer()
+        self.layer.on_close = self.hide_preview
+        self.layer.on_toggle_play = self.toggle_play
+        self.layer.on_seek = self.preview_seek
+        self.overlay.add_overlay(self.layer)
         self._preview_key = None
+        self.player = None
+        self._player_doc = None
+        self._tick_id = None
+        self._seek_id = None
         # extracción de fotogramas completos: un solo hilo, atiende primero lo último pedido (LIFO) y
         # descarta lo que ya exista; así mantener pulsada una flecha no lanza decenas de ffmpeg
         self._full_lock = threading.Condition()
@@ -1618,8 +1860,11 @@ class ThumbSheet(Gtk.Window):
                 pb = GdkPixbuf.Pixbuf.new_from_file(str(thumb))
             except GLib.Error:
                 pb = None
-        self.preview.set_frame(pb, t, doc.path.name)
-        self.preview.show()
+        self._stop_player()
+        self.layer.show_still(pb, t, doc.path.name)
+        self.layer.set_duration(doc.info.duration)
+        self.layer.set_position(t)
+        self.layer.show()
         full = doc.cache_dir / "full" / ("%d.jpg" % t)
         if full.exists():
             self._preview_loaded(doc, t, full)
@@ -1691,22 +1936,123 @@ class ThumbSheet(Gtk.Window):
                 pass
 
     def _preview_loaded(self, doc, t, full):
-        if self._preview_key != (doc, t) or not self.preview.get_visible():
+        if self._preview_key != (doc, t) or not self.layer.get_visible():
             return False
-        alloc = self.preview.get_allocation()
+        alloc = self.layer.stack.get_allocation()
         w, h = max(64, alloc.width), max(64, alloc.height)
         try:
             # decodificado ya al tamaño en que se va a ver (libjpeg escala por DCT: barato y nítido)
             pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(full), w, h, True)
         except GLib.Error:
             return False
-        self.preview.set_frame(pb, t, doc.path.name)
+        self.layer.still.set_frame(pb, t, doc.path.name)
         return False
 
     def hide_preview(self):
         self._preview_key = None
-        if self.preview.get_visible():
-            self.preview.hide()
+        self._stop_player()
+        if self.layer.get_visible():
+            self.layer.hide()
+
+    # ---- reproducción (GStreamer) dentro de la vista ampliada -----------------------------------
+    def _ensure_player(self):
+        if self.player is not None:
+            return self.player
+        if not HAVE_GST:
+            self._flash("Sin GStreamer: sudo apt install gir1.2-gstreamer-1.0 gstreamer1.0-gtk3 gstreamer1.0-libav")
+            return None
+        try:
+            audio = os.environ.get("THUMBSHEET_AUDIO", "1") not in ("0", "off", "no")
+            self.player = Player(audio=audio)
+        except RuntimeError as e:
+            self._flash(str(e))
+            return None
+        self.layer.attach_video(self.player.widget)
+        self.player.on_state = self._on_player_state
+        self.player.on_eos = self._on_player_eos
+        self.player.on_error = self._on_player_error
+        return self.player
+
+    def _start_player(self, start_s, play):
+        doc = self._preview_key[0] if self._preview_key else None
+        if doc is None:
+            return None
+        p = self._ensure_player()
+        if p is None:
+            return None
+        p.load(doc.path, start_s, play)
+        self._player_doc = doc
+        self.layer.show_video()
+        self.layer.set_position(start_s)
+        if self._tick_id is None:
+            self._tick_id = GLib.timeout_add(100, self._player_tick)
+        log("player: carga %s desde %.1f (%s)" % (doc.path.name, start_s, "play" if play else "pausa"))
+        return p
+
+    def _stop_player(self):
+        if self.player is not None and self._player_doc is not None:
+            self.player.stop()
+        self._player_doc = None
+        for attr in ("_tick_id", "_seek_id"):
+            sid = getattr(self, attr)
+            if sid:
+                GLib.source_remove(sid)
+                setattr(self, attr, None)
+        self.layer.set_playing(False)
+
+    def toggle_play(self):
+        if self._preview_key is None:
+            return
+        if self._player_doc is None:
+            self._start_player(self.layer.scale.get_value(), True)
+        elif self.player.is_playing():
+            self.player.pause()
+            log("player: pausa en %.2f" % (self.player.position() or -1))
+        else:
+            self.player.play()
+
+    def preview_seek(self, s):
+        """Barra de progreso. En modo fotograma arranca el vídeo EN PAUSA en ese punto (scrubber); con el
+        vídeo cargado, seek exacto con un pequeño debounce mientras se arrastra."""
+        if self._preview_key is None:
+            return
+        if self._player_doc is None:
+            self._start_player(s, False)
+            return
+        if self._seek_id:
+            GLib.source_remove(self._seek_id)
+        self._seek_id = GLib.timeout_add(60, self._do_seek, s)
+
+    def _do_seek(self, s):
+        self._seek_id = None
+        if self._player_doc is not None:
+            self.player.seek(s)
+            self.layer.set_position(s)
+            log("player: seek a %.2f" % s)
+        return False
+
+    def _player_tick(self):
+        if self._player_doc is None:
+            self._tick_id = None
+            return False
+        pos = self.player.position()
+        if pos is not None:
+            self.layer.set_position(pos)
+        return True
+
+    def _on_player_state(self, playing):
+        self.layer.set_playing(playing)
+        if playing:
+            log("player: reproduciendo")
+
+    def _on_player_eos(self):
+        self.layer.set_playing(False)
+        log("player: fin del vídeo")
+
+    def _on_player_error(self, message):
+        self._flash("No se pudo reproducir: %s" % message)
+        self._stop_player()
+        self.layer.stack.set_visible_child_name("still")
 
     # ---- LLC ------------------------------------------------------------------------------------
     def on_llc(self, *_):
@@ -1841,19 +2187,33 @@ class ThumbSheet(Gtk.Window):
     def on_key(self, widget, event):
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
         if event.keyval == Gdk.KEY_Escape:
-            if self.preview.get_visible():
+            if self.layer.get_visible():
                 self.hide_preview()
             else:
                 self.clear_selection()
             return True
-        if self.preview.get_visible() and event.keyval in (Gdk.KEY_Left, Gdk.KEY_Right, Gdk.KEY_Home, Gdk.KEY_End):
-            if event.keyval == Gdk.KEY_Home:
-                self._preview_step(-10 ** 9)
-            elif event.keyval == Gdk.KEY_End:
-                self._preview_step(10 ** 9)
-            else:
-                self._preview_step(-1 if event.keyval == Gdk.KEY_Left else 1)
-            return True
+        if self.layer.get_visible():
+            if event.keyval == Gdk.KEY_space:
+                self.toggle_play()
+                return True
+            if event.keyval in (Gdk.KEY_Left, Gdk.KEY_Right, Gdk.KEY_Home, Gdk.KEY_End):
+                if self._player_doc is not None:
+                    # con vídeo cargado: saltar un intervalo (o al principio / final)
+                    S = self.generator.S if self.generator else INTERVAL_DEF
+                    dur = self.layer.duration
+                    pos = self.player.position()
+                    if pos is None:
+                        pos = self.layer.scale.get_value()
+                    target = {Gdk.KEY_Left: pos - S, Gdk.KEY_Right: pos + S, Gdk.KEY_Home: 0.0,
+                              Gdk.KEY_End: max(0.0, dur - 0.5)}[event.keyval]
+                    self.preview_seek(max(0.0, min(dur, target)))
+                elif event.keyval == Gdk.KEY_Home:
+                    self._preview_step(-10 ** 9)
+                elif event.keyval == Gdk.KEY_End:
+                    self._preview_step(10 ** 9)
+                else:
+                    self._preview_step(-1 if event.keyval == Gdk.KEY_Left else 1)
+                return True
         if ctrl and event.keyval in (Gdk.KEY_q, Gdk.KEY_w):
             self.destroy()
             return True
@@ -1883,6 +2243,7 @@ class ThumbSheet(Gtk.Window):
         return False
 
     def on_destroy(self, *_):
+        self._stop_player()
         if self.generator:
             self.generator.cancel()
         w, h = self.get_size()
@@ -1914,6 +2275,13 @@ def main(argv):
     GLib.set_prgname(APP)
     GLib.set_application_name(APP)
     Gdk.set_program_class(APP)
+    css = Gtk.CssProvider()
+    css.load_from_data(b"""
+        .ts-preview-bar { background-color: #1a1a1c; padding: 4px 8px; }
+        .ts-preview-bar label, .ts-preview-bar button { color: #e8e8ec; }
+        .ts-black { background-color: #000000; }
+    """)
+    Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
     for tool in ("ffmpeg", "ffprobe"):
         if not shutil.which(tool):
             print("falta %s en el PATH (sudo apt install ffmpeg)" % tool, file=sys.stderr)

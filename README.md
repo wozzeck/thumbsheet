@@ -23,6 +23,12 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   ampliada y en una fracción de segundo la sustituye el fotograma a resolución nativa, que ffmpeg
   extrae aparte y queda en la caché (`full/`). Flechas `←`/`→` pasan al fotograma anterior/siguiente
   (los vecinos se precargan), `Inicio`/`Fin` van al primero/último. Se cierra con clic o `Esc`.
+- **Reproducir desde ahí** (GStreamer, opcional): en la vista ampliada, `espacio` o el botón ▶ de la
+  barra inferior reproduce el vídeo desde ese fotograma, con sonido, dentro de la misma ventana. La
+  barra de progreso se puede arrastrar (hace de *scrubber*: en pausa muestra el fotograma exacto), las
+  flechas saltan ±intervalo, clic sobre el vídeo pausa/reanuda, `Esc` cierra. GStreamer elige solo el
+  decodificador por hardware si lo hay (VA-API). Sin dispositivo de sonido, reproduce en silencio.
+  `THUMBSHEET_AUDIO=0` silencia siempre.
 - **LLC**: guarda un proyecto de LosslessCut `<vídeo>-proj.llc` junto al vídeo, con un segmento por
   cada racha de teselas seleccionadas (del instante de la primera al de la última más el intervalo).
   Al abrir el vídeo en LosslessCut, los segmentos aparecen ya cargados. El fichero es JSON, válido
@@ -49,6 +55,13 @@ Actualizar: `git -C ~/ws/thumbsheet pull`; si ha cambiado `thumbsheet.desktop`, 
 
 Opcional, para decodificar por GPU (se usa sola si funciona): `intel-media-va-driver` (Intel
 Broadwell+), `i965-va-driver` (Intel más antiguos) o `mesa-va-drivers` (AMD).
+
+Opcional, para reproducir en la vista ampliada (sin esto el resto funciona igual):
+```
+sudo apt install gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gstreamer1.0-gtk3 gstreamer1.0-libav gstreamer1.0-plugins-good
+```
+(`gstreamer1.0-vaapi` añade decodificación por GPU también al reproductor en equipos antiguos; en
+GStreamer ≥ 1.22 el plugin `va` lo hace solo.)
 
 ## Cómo va de rápido (y por qué no atasca el equipo)
 
@@ -94,7 +107,8 @@ inicialización de VAAPI), por eso sólo se usa en el modo tramos.
 
 | Variable | Efecto |
 |---|---|
-| `THUMBSHEET_HWACCEL=0` | no usar GPU |
+| `THUMBSHEET_HWACCEL=0` | no usar GPU (ffmpeg) |
+| `THUMBSHEET_AUDIO=0` | reproducir siempre en silencio |
 | `THUMBSHEET_WORKERS=4` | número de ffmpeg en paralelo (por defecto: núcleos físicos − 1, con tope por RAM) |
 | `THUMBSHEET_THUMB_PX=320` | lado mayor de la miniatura guardada (por defecto 480; cambia la huella de caché) |
 | `THUMBSHEET_PIX_MB=32` | presupuesto de la caché de miniaturas decodificadas en memoria |
@@ -105,7 +119,8 @@ Ajustes (intervalo, tamaño, ventana) se guardan en `~/.config/thumbsheet/settin
 ## Estructura
 
 - `thumbsheet.py` — todo: sondeo (`VideoInfo`), planificador y workers (`Generator`), GPU (`Gpu`),
-  caché/cargador (`PixCache`, `Loader`), mosaico y selección (`Sheet`), segmentos y proyecto LLC
+  caché/cargador (`PixCache`, `Loader`), mosaico y selección (`Sheet`), vista ampliada y reproductor
+  (`Preview`, `PreviewLayer`, `Player`), segmentos y proyecto LLC
   (`selection_segments`, `write_llc_project`), vídeo abierto (`Document`), ventana (`ThumbSheet`).
 - `thumbsheet` — lanzador; `thumbsheet.desktop` + `icon.svg` — entrada de menú; `install.sh`.
 - `tests/` — comprobaciones sin pantalla del generador (ver `tests/README.md`).

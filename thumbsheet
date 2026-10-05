@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Lanzador de thumbsheet. Uso: thumbsheet [vídeo]
+set -euo pipefail
+DIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+exec python3 "$DIR/thumbsheet.py" "$@"

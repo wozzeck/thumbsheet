@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=thumbsheet
+GenericName=Sábana de miniaturas de vídeo
+Comment=Mosaico de capturas de un vídeo cada N segundos
+Exec=@BIN@ %f
+Icon=@ICON@
+Terminal=false
+Categories=AudioVideo;Video;Viewer;
+MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;video/mpeg;video/MP2T;video/x-flv;video/x-ms-wmv;video/3gpp;video/ogg;video/x-m4v;
+StartupNotify=true
+StartupWMClass=thumbsheet

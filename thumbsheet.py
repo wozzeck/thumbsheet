@@ -1045,11 +1045,11 @@ class Preview(Gtk.DrawingArea):
 # selección → segmentos → proyecto de LosslessCut
 # ----------------------------------------------------------------------------------------------
 class Selection(object):
-    """Lo seleccionado son SEGMENTOS de tiempo [inicio, fin), no teselas. Una tesela t del intervalo S está
-    marcada si su tramo [t, t+S) solapa algún segmento. Al cambiar de intervalo, `resnap` reajusta los
-    segmentos hacia fuera a la nueva rejilla: con 15–25 s y teselas de 10 s quedan marcadas 10 y 20 → el
-    segmento pasa a ser 10–30; al volver a 5 s sigue siendo 10–30 (las teselas intermedias aparecen
-    marcadas, el segmento no cambia)."""
+    """Lo seleccionado son SEGMENTOS de tiempo [inicio, fin), no teselas. Una tesela t del intervalo S se
+    muestra marcada si su tramo [t, t+S) solapa algún segmento. Los segmentos guardados NO dependen de la
+    rejilla: con 15–25 s y teselas de 10 s se ven marcadas 10 y 20 (la rejilla gruesa sólo puede mostrar
+    10–30), pero el segmento sigue siendo 15–25 y al volver a 5 s recupera sus bordes. Marcar o desmarcar
+    una tesela suma o resta su tramo [t, t+S) a los segmentos."""
 
     def __init__(self, segments=None):
         self.segments = self._normalize(segments or [])
@@ -1103,12 +1103,6 @@ class Selection(object):
                     out.add(t)
                     break
         return out
-
-    def resnap(self, timestamps, interval, duration):
-        """Reajusta los segmentos a la rejilla (unión de los tramos de las teselas marcadas)."""
-        self.segments = self._normalize(self.tile_range(t, interval, duration)
-                                        for t in self.tiles(timestamps, interval, duration))
-        return self.segments
 
     def to_json(self):
         return {"segments": [[_num(a), _num(b)] for a, b in self.segments]}
@@ -1506,11 +1500,7 @@ class ThumbSheet(Gtk.Window):
         holder.append(gen)
         self.generator = gen
         self.sheet.set_plan(gen.timestamps)
-        # la selección se reajusta a la nueva rejilla (hacia fuera) y se refleja en las teselas
-        before = list(doc.selection.segments)
-        doc.selection.resnap(gen.timestamps, S, doc.info.duration)
-        if doc.selection.segments != before:
-            doc.save_selection()
+        # se marcan las teselas que tocan algún segmento; los segmentos guardados no cambian con la rejilla
         self.sheet.set_selected(doc.selection.tiles(gen.timestamps, S, doc.info.duration))
         self.scroller.get_vadjustment().set_value(0)
         gen.start()

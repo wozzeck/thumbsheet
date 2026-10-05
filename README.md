@@ -14,10 +14,11 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
 - **Selección**: clic = alternar una tesela; clic y arrastrar = aplicar a un rango contiguo. Las
   seleccionadas se recuadran en rojo. `Esc` deselecciona todo. Lo que se guarda son **segmentos de
   tiempo**, no teselas: una tesela está marcada si su tramo `[t, t+intervalo)` cae dentro de un
-  segmento. Por eso al cambiar el intervalo la selección no se trocea: al afinarlo (10 → 5 s) el
-  segmento no cambia y las teselas intermedias aparecen marcadas; al engrosarlo (5 → 10 s) el segmento
-  se amplía hacia fuera hasta la rejilla nueva (15–25 s pasa a 10–30 s). Se recuerda por vídeo entre
-  sesiones (en la caché).
+  segmento. Por eso al cambiar el intervalo la selección no se trocea: al afinarlo (10 → 5 s) las
+  teselas intermedias aparecen marcadas; al engrosarlo (5 → 10 s) se ven marcadas las teselas que tocan
+  el segmento (15–25 s muestra 10 y 20), pero el segmento guardado no cambia y al volver a la rejilla
+  fina recupera sus bordes. El LLC exporta siempre los segmentos guardados, los precisos. Marcar o
+  desmarcar una tesela suma o resta su tramo. Se recuerda por vídeo entre sesiones (en la caché).
 - **Clic derecho** sobre una tesela: vista ampliada a toda la ventana. Sale al instante la miniatura
   ampliada y en una fracción de segundo la sustituye el fotograma a resolución nativa, que ffmpeg
   extrae aparte y queda en la caché (`full/`). Se cierra con clic o `Esc`.

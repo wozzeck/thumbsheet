@@ -11,17 +11,19 @@ def check(cond, msg):
     if not cond: fails += 1
 
 S = T.Selection
-# ejemplo del user: 15–25 s seleccionado; al pasar a teselas de 10 s se marcan 10 y 20 → segmento 10–30;
-# al volver a 5 s las teselas intermedias aparecen marcadas y el segmento NO cambia
+# ejemplo del user: 15–25 s seleccionado; con teselas de 10 s se VEN marcadas 10 y 20, pero el segmento
+# guardado sigue siendo 15–25 y al volver a 5 s recupera sus bordes
 sel = S([(15, 25)])
 g5 = list(range(0, 100, 5)); g10 = list(range(0, 100, 10)); dur = 100
 check(sel.tiles(g5, 5, dur) == {15, 20}, "15–25 con rejilla de 5 s marca 15 y 20")
-check(sel.tiles(g10, 10, dur) == {10, 20}, "15–25 con rejilla de 10 s marca 10 y 20")
-sel.resnap(g10, 10, dur)
-check(sel.segments == [(10.0, 30.0)], "al bajar a 10 s el segmento se amplía a 10–30: %s" % sel.segments)
-sel.resnap(g5, 5, dur)
-check(sel.segments == [(10.0, 30.0)], "al subir a 5 s el segmento sigue siendo 10–30: %s" % sel.segments)
-check(sel.tiles(g5, 5, dur) == {10, 15, 20, 25}, "y marca las teselas 10, 15, 20, 25 (las intermedias aparecen marcadas)")
+check(sel.tiles(g10, 10, dur) == {10, 20}, "15–25 con rejilla de 10 s muestra marcadas 10 y 20")
+check(sel.segments == [(15.0, 25.0)], "...pero el segmento guardado sigue siendo 15–25: %s" % sel.segments)
+check(sel.tiles(g5, 5, dur) == {15, 20}, "al volver a 5 s recupera los bordes originales (15 y 20)")
+sel2 = S([(10, 30)])
+check(sel2.tiles(g5, 5, dur) == {10, 15, 20, 25}, "10–30 fino: las teselas intermedias aparecen marcadas, el segmento no cambia")
+# editar en rejilla gruesa opera con tramos de esa rejilla sobre los segmentos finos
+sel3 = S([(15, 25)]); sel3.remove(*S.tile_range(10, 10, dur))
+check(sel3.segments == [(20.0, 25.0)], "desmarcar la tesela 10 (de 10 s) recorta a 20–25: %s" % sel3.segments)
 # alternar teselas = sumar/restar su tramo
 sel = S()
 sel.add(*S.tile_range(40, 5, dur)); sel.add(*S.tile_range(45, 5, dur)); sel.add(*S.tile_range(50, 5, dur))

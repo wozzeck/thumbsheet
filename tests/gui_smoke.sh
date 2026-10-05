@@ -52,11 +52,11 @@ shot 4-llc 0.5
 # cambiar el intervalo reajusta los segmentos hacia fuera a la nueva rejilla (y no los trocea)
 xdotool mousemove $((X+IX)) $((Y+IY)) click 5 click 5; sleep 1.5     # 40 → 30 s
 S3=$(cat "$SEL"/*/selection.json 2>/dev/null | head -1)
-[[ "$S3" == '{"segments": [[180, 360]]}' ]] && ok "40→30 s: 200–360 pasa a 180–360 (teselas 180..330 de 30 s)" || ko "reajuste a 30 s inesperado: $S3"
+[[ "$S3" == '{"segments": [[200, 360]]}' ]] && ok "40→30 s: el segmento guardado sigue siendo 200–360 (se ven 180..330)" || ko "a 30 s el segmento cambió: $S3"
 shot 4b-intervalo-30 0.8
 xdotool mousemove $((X+IX)) $((Y+IY)) click 4 click 4; sleep 1.5     # 30 → 40 s
 S4=$(cat "$SEL"/*/selection.json 2>/dev/null | head -1)
-[[ "$S4" == '{"segments": [[160, 360]]}' ]] && ok "30→40 s: 180–360 pasa a 160–360 (hacia fuera, sin trocear)" || ko "reajuste a 40 s inesperado: $S4"
+[[ "$S4" == '{"segments": [[200, 360]]}' ]] && ok "30→40 s: sigue 200–360 (bordes originales)" || ko "a 40 s el segmento cambió: $S4"
 # clic derecho = vista ampliada; se cierra con clic o con Esc (sin tocar la selección)
 xdotool mousemove $(tile 0 2) click 3; shot 4c-vista-ampliada 1.5
 FULL=$(ls "$SEL"/*/full/80.jpg 2>/dev/null | head -1)
@@ -64,7 +64,7 @@ FULL=$(ls "$SEL"/*/full/80.jpg 2>/dev/null | head -1)
 xdotool mousemove $((X+700)) $((Y+450)) click 1; sleep 0.5; shot 4d-vista-cerrada 0.3
 xdotool mousemove $(tile 0 2) click 3; sleep 0.8; xdotool windowfocus --sync "$WID"; xdotool key Escape; sleep 0.5
 S5=$(cat "$SEL"/*/selection.json 2>/dev/null | head -1)
-[[ "$S5" == '{"segments": [[160, 360]]}' ]] && ok "Esc cierra la vista ampliada sin tocar la selección" || ko "Esc sobre la vista alteró la selección: $S5"
+[[ "$S5" == '{"segments": [[200, 360]]}' ]] && ok "Esc cierra la vista ampliada sin tocar la selección" || ko "Esc sobre la vista alteró la selección: $S5"
 # segundo vídeo y vuelta
 xdotool mousemove $((X+${ROW2%,*})) $((Y+${ROW2#*,})) click 1; shot 5-segundo-video 3
 xdotool mousemove $((X+${ROW1%,*})) $((Y+${ROW1#*,})) click 1; shot 6-vuelta 1.5

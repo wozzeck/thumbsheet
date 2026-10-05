@@ -21,7 +21,8 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   desmarcar una tesela suma o resta su tramo. Se recuerda por vídeo entre sesiones (en la caché).
 - **Clic derecho** sobre una tesela: vista ampliada a toda la ventana. Sale al instante la miniatura
   ampliada y en una fracción de segundo la sustituye el fotograma a resolución nativa, que ffmpeg
-  extrae aparte y queda en la caché (`full/`). Se cierra con clic o `Esc`.
+  extrae aparte y queda en la caché (`full/`). Flechas `←`/`→` pasan al fotograma anterior/siguiente
+  (los vecinos se precargan), `Inicio`/`Fin` van al primero/último. Se cierra con clic o `Esc`.
 - **LLC**: guarda un proyecto de LosslessCut `<vídeo>-proj.llc` junto al vídeo, con un segmento por
   cada racha de teselas seleccionadas (del instante de la primera al de la última más el intervalo).
   Al abrir el vídeo en LosslessCut, los segmentos aparecen ya cargados. El fichero es JSON, válido

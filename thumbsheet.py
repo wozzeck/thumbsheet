@@ -1328,6 +1328,11 @@ class ThumbSheet(Gtk.Window):
         self.preview.on_close = self.hide_preview
         self.overlay.add_overlay(self.preview)
         self._preview_key = None
+        # extracción de fotogramas completos: un solo hilo, atiende primero lo último pedido (LIFO) y
+        # descarta lo que ya exista; así mantener pulsada una flecha no lanza decenas de ffmpeg
+        self._full_lock = threading.Condition()
+        self._full_jobs = []
+        threading.Thread(target=self._full_loop, name="ts-full", daemon=True).start()
         side = Gtk.ScrolledWindow()
         side.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         side.set_size_request(140, -1)
@@ -1618,8 +1623,48 @@ class ThumbSheet(Gtk.Window):
         full = doc.cache_dir / "full" / ("%d.jpg" % t)
         if full.exists():
             self._preview_loaded(doc, t, full)
-        else:
-            threading.Thread(target=self._extract_full, args=(doc, t, full), name="ts-full", daemon=True).start()
+        # vecinos primero (quedan debajo en la pila) y el actual el último: LIFO lo atiende antes
+        ts = self.generator.timestamps if self.generator else []
+        neighbours = [ts[i] for i in (self._tile_index(t) - 1, self._tile_index(t) + 1) if 0 <= i < len(ts)]
+        self._request_full(doc, neighbours + ([] if full.exists() else [t]))
+
+    def _tile_index(self, t):
+        ts = self.generator.timestamps if self.generator else []
+        if not ts:
+            return -1
+        return min(range(len(ts)), key=lambda k: abs(ts[k] - t))
+
+    def _preview_step(self, delta):
+        """Flechas izquierda/derecha en la vista ampliada: fotograma anterior/siguiente."""
+        if self._preview_key is None or not self.generator:
+            return
+        doc, t = self._preview_key
+        ts = self.generator.timestamps
+        i = max(0, min(len(ts) - 1, self._tile_index(t) + delta))
+        if ts and ts[i] != t:
+            self.show_preview(ts[i])
+
+    def _request_full(self, doc, timestamps):
+        with self._full_lock:
+            for t in timestamps:
+                job = (doc, t)
+                if job in self._full_jobs:
+                    self._full_jobs.remove(job)
+                self._full_jobs.append(job)
+            del self._full_jobs[:-12]   # como mucho una docena pendientes
+            self._full_lock.notify()
+
+    def _full_loop(self):
+        while True:
+            with self._full_lock:
+                while not self._full_jobs:
+                    self._full_lock.wait()
+                doc, t = self._full_jobs.pop()
+            full = doc.cache_dir / "full" / ("%d.jpg" % t)
+            if full.exists():
+                GLib.idle_add(self._preview_loaded, doc, t, full)
+                continue
+            self._extract_full(doc, t, full)
 
     def _extract_full(self, doc, t, full):
         """Fotograma a resolución nativa, en un ffmpeg aparte (0,1–0,3 s); queda en la caché (full/)."""
@@ -1800,6 +1845,14 @@ class ThumbSheet(Gtk.Window):
                 self.hide_preview()
             else:
                 self.clear_selection()
+            return True
+        if self.preview.get_visible() and event.keyval in (Gdk.KEY_Left, Gdk.KEY_Right, Gdk.KEY_Home, Gdk.KEY_End):
+            if event.keyval == Gdk.KEY_Home:
+                self._preview_step(-10 ** 9)
+            elif event.keyval == Gdk.KEY_End:
+                self._preview_step(10 ** 9)
+            else:
+                self._preview_step(-1 if event.keyval == Gdk.KEY_Left else 1)
             return True
         if ctrl and event.keyval in (Gdk.KEY_q, Gdk.KEY_w):
             self.destroy()

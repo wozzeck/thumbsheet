@@ -61,6 +61,11 @@ S4=$(cat "$SEL"/*/selection.json 2>/dev/null | head -1)
 xdotool mousemove $(tile 0 2) click 3; shot 4c-vista-ampliada 1.5
 FULL=$(ls "$SEL"/*/full/80.jpg 2>/dev/null | head -1)
 [[ -n "$FULL" ]] && ok "fotograma completo extraído: $(python3 -c "import gi; gi.require_version('GdkPixbuf','2.0'); from gi.repository import GdkPixbuf; p=GdkPixbuf.Pixbuf.new_from_file('$FULL'); print(p.get_width(),'x',p.get_height())")" || ko "no se extrajo full/80.jpg"
+# flechas: siguiente / anterior fotograma (vecinos precargados)
+xdotool windowfocus --sync "$WID"; xdotool key Right; sleep 0.9; shot 4c2-flecha-derecha 0.2
+[[ -f "$SEL"/*/full/120.jpg ]] 2>/dev/null || ls "$SEL"/*/full/120.jpg >/dev/null 2>&1 && ok "flecha derecha: fotograma 2:00 (120 s) extraído" || ko "flecha derecha: falta full/120.jpg"
+xdotool key Left key Left; sleep 0.9
+ls "$SEL"/*/full/40.jpg >/dev/null 2>&1 && ok "dos flechas izquierda: fotograma 0:40 extraído" || ko "flecha izquierda: falta full/40.jpg"
 xdotool mousemove $((X+700)) $((Y+450)) click 1; sleep 0.5; shot 4d-vista-cerrada 0.3
 xdotool mousemove $(tile 0 2) click 3; sleep 0.8; xdotool windowfocus --sync "$WID"; xdotool key Escape; sleep 0.5
 S5=$(cat "$SEL"/*/selection.json 2>/dev/null | head -1)

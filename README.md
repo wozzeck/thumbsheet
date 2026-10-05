@@ -11,9 +11,16 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
 
 - **Varios vídeos**: se listan en el panel izquierdo (nombre, duración y resolución); clic para ver
   cada sábana. Se añaden más con `Ctrl+O` o arrastrándolos a la ventana.
-- **Selección de teselas**: clic = alternar una tesela; clic y arrastrar = aplicar a un rango
-  contiguo. Las seleccionadas se recuadran en rojo. `Esc` deselecciona todo. La selección se
-  recuerda por vídeo entre sesiones (en la caché).
+- **Selección**: clic = alternar una tesela; clic y arrastrar = aplicar a un rango contiguo. Las
+  seleccionadas se recuadran en rojo. `Esc` deselecciona todo. Lo que se guarda son **segmentos de
+  tiempo**, no teselas: una tesela está marcada si su tramo `[t, t+intervalo)` cae dentro de un
+  segmento. Por eso al cambiar el intervalo la selección no se trocea: al afinarlo (10 → 5 s) el
+  segmento no cambia y las teselas intermedias aparecen marcadas; al engrosarlo (5 → 10 s) el segmento
+  se amplía hacia fuera hasta la rejilla nueva (15–25 s pasa a 10–30 s). Se recuerda por vídeo entre
+  sesiones (en la caché).
+- **Clic derecho** sobre una tesela: vista ampliada a toda la ventana. Sale al instante la miniatura
+  ampliada y en una fracción de segundo la sustituye el fotograma a resolución nativa, que ffmpeg
+  extrae aparte y queda en la caché (`full/`). Se cierra con clic o `Esc`.
 - **LLC**: guarda un proyecto de LosslessCut `<vídeo>-proj.llc` junto al vídeo, con un segmento por
   cada racha de teselas seleccionadas (del instante de la primera al de la última más el intervalo).
   Al abrir el vídeo en LosslessCut, los segmentos aparecen ya cargados. El fichero es JSON, válido

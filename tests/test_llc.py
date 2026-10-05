@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pruebas unitarias sin pantalla: segmentos a partir de la selección, proyecto LLC y ajuste de intervalo."""
+"""Pruebas unitarias sin pantalla: selección como segmentos (reajuste al cambiar el intervalo), proyecto LLC y ajuste de intervalo."""
 import sys, pathlib, json, tempfile
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import thumbsheet as T
@@ -10,13 +10,30 @@ def check(cond, msg):
     print(("ok   " if cond else "FAIL ") + msg)
     if not cond: fails += 1
 
-ts = list(range(0, 100, 5))   # 0..95, S=5, duración 97.3
-segs = T.selection_segments({10, 15, 20, 40, 95}, ts, 5, 97.3)
-check(segs == [(10.0, 25.0), (40.0, 45.0), (95.0, 97.3)], "rachas contiguas → segmentos, fin = último + S acotado a la duración: %s" % segs)
-check(T.selection_segments(set(), ts, 5, 97.3) == [], "sin selección → sin segmentos")
-check(T.selection_segments({7}, ts, 5, 97.3) == [], "un timestamp que no es tesela se ignora")
-check(T.selection_segments({0, 5, 10}, [0, 5, 10], 5, 15) == [(0.0, 15.0)], "todo seleccionado → un segmento entero")
-check(T.selection_segments({0, 10}, [0, 10, 20], 10, 30) == [(0.0, 20.0)], "contigüidad medida con el intervalo real (S=10)")
+S = T.Selection
+# ejemplo del user: 15–25 s seleccionado; al pasar a teselas de 10 s se marcan 10 y 20 → segmento 10–30;
+# al volver a 5 s las teselas intermedias aparecen marcadas y el segmento NO cambia
+sel = S([(15, 25)])
+g5 = list(range(0, 100, 5)); g10 = list(range(0, 100, 10)); dur = 100
+check(sel.tiles(g5, 5, dur) == {15, 20}, "15–25 con rejilla de 5 s marca 15 y 20")
+check(sel.tiles(g10, 10, dur) == {10, 20}, "15–25 con rejilla de 10 s marca 10 y 20")
+sel.resnap(g10, 10, dur)
+check(sel.segments == [(10.0, 30.0)], "al bajar a 10 s el segmento se amplía a 10–30: %s" % sel.segments)
+sel.resnap(g5, 5, dur)
+check(sel.segments == [(10.0, 30.0)], "al subir a 5 s el segmento sigue siendo 10–30: %s" % sel.segments)
+check(sel.tiles(g5, 5, dur) == {10, 15, 20, 25}, "y marca las teselas 10, 15, 20, 25 (las intermedias aparecen marcadas)")
+# alternar teselas = sumar/restar su tramo
+sel = S()
+sel.add(*S.tile_range(40, 5, dur)); sel.add(*S.tile_range(45, 5, dur)); sel.add(*S.tile_range(50, 5, dur))
+check(sel.segments == [(40.0, 55.0)], "tres teselas contiguas → un segmento 40–55: %s" % sel.segments)
+sel.remove(*S.tile_range(45, 5, dur))
+check(sel.segments == [(40.0, 45.0), (50.0, 55.0)], "quitar la del medio parte el segmento: %s" % sel.segments)
+sel.add(*S.tile_range(95, 5, 97.3))
+check(sel.segments[-1] == (95.0, 97.3), "la última tesela se acota a la duración: %s" % (sel.segments[-1],))
+check(S([(10, 20), (20, 30), (50, 60), (55, 58)]).segments == [(10.0, 30.0), (50.0, 60.0)], "normalización: funde adyacentes y solapados")
+check(S.from_json({"segments": [[1, 2.5]]}).segments == [(1.0, 2.5)] and S.from_json([40, 50]).segments == [(40.0, 45.0), (50.0, 55.0)], "carga JSON nuevo y formato antiguo (teselas → tramos de 5 s)")
+check(S([(10, 20)]).to_json() == {"segments": [[10, 20]]}, "to_json con enteros limpios")
+check(not S() and bool(S([(0, 1)])), "bool(): vacío / no vacío")
 
 with tempfile.TemporaryDirectory() as d:
     v = pathlib.Path(d) / "mi vídeo.raro.mp4"; v.write_bytes(b"x")

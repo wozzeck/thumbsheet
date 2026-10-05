@@ -141,6 +141,7 @@ FFMPEG = NICE + ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error"]
 # decodificador software: 1 hilo por proceso (el paralelismo va entre capturas), sin B-frames ni
 # filtro de desbloqueo (invisible a tamaño de miniatura, ahorra un 20-30 % de CPU)
 SW_DEC = ["-threads", "1", "-skip_frame", "noref", "-skip_loop_filter", "all", "-flags2", "+fast"]
+FULL_DEC = ["-threads", "1", "-skip_frame", "noref"]   # fotograma a resolución nativa (vista ampliada)
 
 
 # ----------------------------------------------------------------------------------------------
@@ -726,8 +727,11 @@ class Sheet(Gtk.DrawingArea):
         self._settle_id = None
         self.loader = Loader(self.cache, self._visible_set, self.queue_draw)
         self.font = Pango.FontDescription("Sans 9")
-        self.selected = set()                 # timestamps seleccionados (el set lo comparte el documento)
-        self.on_selection_changed = None
+        self.selected = set()                 # teselas marcadas: vista derivada de los segmentos del documento
+        self.on_drag_begin = None             # () -> None            : la ventana guarda una instantánea
+        self.on_drag_apply = None             # (timestamps, mode)    : aplica sobre la instantánea
+        self.on_drag_end = None               # () -> None            : persistir / refrescar
+        self.on_preview = None                # (t) -> None           : clic derecho = ampliar a ventana completa
         self._drag = None
         self.connect("draw", self.on_draw)
         self.connect("size-allocate", lambda *_: self._relayout())
@@ -739,14 +743,20 @@ class Sheet(Gtk.DrawingArea):
         self.set_hexpand(True)
 
     # --- modelo ---
-    def set_video(self, aspect, cache_dir, selected=None):
+    def set_video(self, aspect, cache_dir):
         self.aspect = max(0.2, min(5.0, aspect))
         self.cache_dir = cache_dir
-        self.selected = selected if selected is not None else set()
+        self.selected = set()
         self._drag = None
         self.cache.clear()
         self.loader.cancel_all()
         self.set_plan([])
+
+    def set_selected(self, selected):
+        selected = set(selected)
+        if selected != self.selected:
+            self.selected = selected
+            self.queue_draw()
 
     # --- selección: clic = alternar una tesela; clic y arrastrar = aplicar a un rango contiguo ---
     def _tile_at(self, x, y, loose=False):
@@ -769,12 +779,21 @@ class Sheet(Gtk.DrawingArea):
         return i
 
     def on_press(self, widget, event):
-        if event.button != 1 or event.type != Gdk.EventType.BUTTON_PRESS:
-            return event.button == 1
+        if event.type != Gdk.EventType.BUTTON_PRESS:
+            return event.button in (1, 3)
+        if event.button == 3:
+            i = self._tile_at(event.x, event.y)
+            if i is not None and self.on_preview:
+                self.on_preview(self.ts[i])
+            return True
+        if event.button != 1:
+            return False
         i = self._tile_at(event.x, event.y)
         if i is None:
             return False
-        self._drag = {"i0": i, "mode": self.ts[i] not in self.selected, "snapshot": set(self.selected), "last": None}
+        self._drag = {"i0": i, "mode": self.ts[i] not in self.selected, "last": None}
+        if self.on_drag_begin:
+            self.on_drag_begin()
         self._apply_drag(i)
         return True
 
@@ -790,33 +809,16 @@ class Sheet(Gtk.DrawingArea):
         if event.button != 1 or self._drag is None:
             return False
         self._drag = None
-        if self.on_selection_changed:
-            self.on_selection_changed()
+        if self.on_drag_end:
+            self.on_drag_end()
         return True
 
     def _apply_drag(self, i):
         d = self._drag
         a, b = sorted((d["i0"], i))
-        new = set(d["snapshot"])
-        for k in range(a, b + 1):
-            if d["mode"]:
-                new.add(self.ts[k])
-            else:
-                new.discard(self.ts[k])
         d["last"] = i
-        if new != self.selected:
-            self.selected.clear()
-            self.selected.update(new)
-            self.queue_draw()
-
-    def clear_selection(self):
-        if not self.selected:
-            return False
-        self.selected.clear()
-        self.queue_draw()
-        if self.on_selection_changed:
-            self.on_selection_changed()
-        return True
+        if self.on_drag_apply:
+            self.on_drag_apply([self.ts[k] for k in range(a, b + 1)], d["mode"])
 
     def set_plan(self, ts):
         self.ts = list(ts)
@@ -977,23 +979,147 @@ class Sheet(Gtk.DrawingArea):
 
 
 # ----------------------------------------------------------------------------------------------
+# vista ampliada de un fotograma (clic derecho sobre una tesela)
+# ----------------------------------------------------------------------------------------------
+class Preview(Gtk.DrawingArea):
+    """Capa negra sobre el panel y el mosaico con el fotograma encajado al tamaño disponible. Primero muestra
+    la miniatura ampliada (instantáneo) y, en cuanto ffmpeg saca el fotograma a resolución nativa, lo sustituye."""
+
+    def __init__(self):
+        super(Preview, self).__init__()
+        self.pixbuf = None
+        self.t = None
+        self.label = ""
+        self.on_close = None
+        self.font = Pango.FontDescription("Sans 11")
+        self.set_no_show_all(True)
+        self.set_halign(Gtk.Align.FILL)
+        self.set_valign(Gtk.Align.FILL)
+        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        self.connect("draw", self.on_draw)
+        self.connect("button-press-event", self._on_press)
+
+    def _on_press(self, widget, event):
+        if self.on_close:
+            self.on_close()
+        return True
+
+    def set_frame(self, pixbuf, t, label):
+        self.pixbuf, self.t, self.label = pixbuf, t, label
+        self.queue_draw()
+
+    def on_draw(self, widget, cr):
+        alloc = self.get_allocation()
+        aw, ah = max(1, alloc.width), max(1, alloc.height)
+        cr.set_source_rgb(0, 0, 0)
+        cr.paint()
+        pb = self.pixbuf
+        if pb is not None:
+            pw, ph = pb.get_width(), pb.get_height()
+            sc = min(aw / float(pw), ah / float(ph))
+            dw, dh = pw * sc, ph * sc
+            cr.save()
+            cr.translate((aw - dw) / 2.0, (ah - dh) / 2.0)
+            cr.scale(sc, sc)
+            Gdk.cairo_set_source_pixbuf(cr, pb, 0, 0)
+            cr.get_source().set_filter(cairo.FILTER_GOOD if sc < 1 else cairo.FILTER_BILINEAR)
+            cr.rectangle(0, 0, pw, ph)
+            cr.fill()
+            cr.restore()
+        if self.t is not None:
+            layout = PangoCairo.create_layout(cr)
+            layout.set_font_description(self.font)
+            layout.set_text("%s · %s" % (fmt_time(self.t), self.label), -1)
+            tw, th = layout.get_pixel_size()
+            bx, by = 10, ah - th - 14
+            cr.set_source_rgba(0, 0, 0, 0.65)
+            Sheet._rounded(cr, bx, by, tw + 14, th + 6, 4)
+            cr.fill()
+            cr.set_source_rgb(0.95, 0.95, 0.95)
+            cr.move_to(bx + 7, by + 3)
+            PangoCairo.show_layout(cr, layout)
+        return False
+
+
+# ----------------------------------------------------------------------------------------------
 # selección → segmentos → proyecto de LosslessCut
 # ----------------------------------------------------------------------------------------------
-def selection_segments(selected, timestamps, interval, duration):
-    """Rachas de teselas seleccionadas contiguas → [(inicio, fin)]. El fin de un segmento es el instante de
-    la última tesela más el intervalo (acotado a la duración)."""
-    segs, prev = [], None
-    for t in timestamps:
-        if t not in selected:
-            prev = None
-            continue
-        end = min(float(t + interval), float(duration))
-        if prev is not None and prev + interval == t and segs:
-            segs[-1][1] = end
-        else:
-            segs.append([float(t), end])
-        prev = t
-    return [(a, b) for a, b in segs if b > a]
+class Selection(object):
+    """Lo seleccionado son SEGMENTOS de tiempo [inicio, fin), no teselas. Una tesela t del intervalo S está
+    marcada si su tramo [t, t+S) solapa algún segmento. Al cambiar de intervalo, `resnap` reajusta los
+    segmentos hacia fuera a la nueva rejilla: con 15–25 s y teselas de 10 s quedan marcadas 10 y 20 → el
+    segmento pasa a ser 10–30; al volver a 5 s sigue siendo 10–30 (las teselas intermedias aparecen
+    marcadas, el segmento no cambia)."""
+
+    def __init__(self, segments=None):
+        self.segments = self._normalize(segments or [])
+
+    @staticmethod
+    def _normalize(segs):
+        out = []
+        for a, b in sorted((float(a), float(b)) for a, b in segs):
+            if b <= a:
+                continue
+            if out and a <= out[-1][1]:
+                out[-1] = (out[-1][0], max(out[-1][1], b))
+            else:
+                out.append((a, b))
+        return out
+
+    def copy(self):
+        return Selection(list(self.segments))
+
+    def __bool__(self):
+        return bool(self.segments)
+
+    __nonzero__ = __bool__
+
+    def add(self, a, b):
+        self.segments = self._normalize(self.segments + [(a, b)])
+
+    def remove(self, a, b):
+        out = []
+        for x, y in self.segments:
+            if y <= a or x >= b:
+                out.append((x, y))
+                continue
+            if x < a:
+                out.append((x, a))
+            if y > b:
+                out.append((b, y))
+        self.segments = self._normalize(out)
+
+    @staticmethod
+    def tile_range(t, interval, duration):
+        return float(t), min(float(t + interval), float(duration))
+
+    def tiles(self, timestamps, interval, duration):
+        """Teselas marcadas para esta rejilla."""
+        out = set()
+        for t in timestamps:
+            a, b = self.tile_range(t, interval, duration)
+            for x, y in self.segments:
+                if x < b and y > a:
+                    out.add(t)
+                    break
+        return out
+
+    def resnap(self, timestamps, interval, duration):
+        """Reajusta los segmentos a la rejilla (unión de los tramos de las teselas marcadas)."""
+        self.segments = self._normalize(self.tile_range(t, interval, duration)
+                                        for t in self.tiles(timestamps, interval, duration))
+        return self.segments
+
+    def to_json(self):
+        return {"segments": [[_num(a), _num(b)] for a, b in self.segments]}
+
+    @classmethod
+    def from_json(cls, data):
+        if isinstance(data, dict):
+            return cls([(a, b) for a, b in data.get("segments") or []])
+        if isinstance(data, list):   # formato antiguo: lista de teselas sueltas; se asumen tramos de 5 s
+            return cls([(t, t + INTERVAL_STEP) for t in data])
+        return cls()
 
 
 def llc_project_path(video_path):
@@ -1030,7 +1156,7 @@ class Document(object):
         self.info = None
         self.error = None
         self.cache_dir = None
-        self.selected = set()
+        self.selection = Selection()
         self.scroll = 0.0
         self.row = None
         self.lock = threading.Lock()
@@ -1055,10 +1181,9 @@ class Document(object):
                     except OSError:
                         pass
             try:
-                sel = json.loads((cache_dir / "selection.json").read_text(encoding="utf-8"))
-                self.selected.update(int(t) for t in sel)
+                self.selection = Selection.from_json(json.loads((cache_dir / "selection.json").read_text(encoding="utf-8")))
             except (OSError, ValueError, TypeError):
-                pass
+                self.selection = Selection()
             self.cache_dir = cache_dir
             self.info = info
 
@@ -1067,8 +1192,8 @@ class Document(object):
             return
         try:
             f = self.cache_dir / "selection.json"
-            if self.selected:
-                f.write_text(json.dumps(sorted(self.selected)), encoding="utf-8")
+            if self.selection:
+                f.write_text(json.dumps(self.selection.to_json()), encoding="utf-8")
             elif f.exists():
                 f.unlink()
         except OSError:
@@ -1200,9 +1325,15 @@ class ThumbSheet(Gtk.Window):
         self.status.set_max_width_chars(46)   # los mensajes largos se recortan, no estrechan los sliders
         bar.pack_end(self.status, False, False, 4)
 
-        # --- panel de ficheros + mosaico ---
+        # --- panel de ficheros + mosaico (con la vista ampliada superpuesta) ---
+        self.overlay = Gtk.Overlay()
+        vbox.pack_start(self.overlay, True, True, 0)
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        vbox.pack_start(self.paned, True, True, 0)
+        self.overlay.add(self.paned)
+        self.preview = Preview()
+        self.preview.on_close = self.hide_preview
+        self.overlay.add_overlay(self.preview)
+        self._preview_key = None
         side = Gtk.ScrolledWindow()
         side.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         side.set_size_request(140, -1)
@@ -1215,7 +1346,11 @@ class ThumbSheet(Gtk.Window):
         self.scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.ALWAYS)
         self.sheet = Sheet()
         self.sheet.set_tile_w(tile)
-        self.sheet.on_selection_changed = self.on_selection_changed
+        self.sheet.on_drag_begin = self.on_drag_begin
+        self.sheet.on_drag_apply = self.on_drag_apply
+        self.sheet.on_drag_end = self.on_drag_end
+        self.sheet.on_preview = self.show_preview
+        self._sel_snapshot = None
         self.scroller.add(self.sheet)
         self.paned.pack2(self.scroller, True, False)
         self.paned.set_position(int(self.settings.get("panel_w", 240)))
@@ -1323,6 +1458,7 @@ class ThumbSheet(Gtk.Window):
     def show_document(self, doc):
         if doc is self.current:
             return
+        self.hide_preview()
         if self.current is not None:
             self.current.scroll = self.scroller.get_vadjustment().get_value()
         if self.generator:
@@ -1335,12 +1471,12 @@ class ThumbSheet(Gtk.Window):
         doc = self.current
         self.set_title("%s — %s" % (doc.path.name, APP) if doc else APP)
         if doc is None or doc.info is None:
-            self.sheet.set_video(16.0 / 9.0, None, set())
+            self.sheet.set_video(16.0 / 9.0, None)
             self._progress = (0, 0)
             self._refresh_status()
             self._update_buttons()
             return
-        self.sheet.set_video(doc.info.aspect, doc.cache_dir, doc.selected)
+        self.sheet.set_video(doc.info.aspect, doc.cache_dir)
         log("vídeo: %s %dx%d %s %.2ffps dur=%s gop=%s miniatura=%dx%d" % (
             doc.path.name, doc.info.width, doc.info.height, doc.info.codec, doc.info.fps,
             fmt_time(doc.info.duration), doc.info.gop, doc.info.thumb_w, doc.info.thumb_h))
@@ -1370,6 +1506,12 @@ class ThumbSheet(Gtk.Window):
         holder.append(gen)
         self.generator = gen
         self.sheet.set_plan(gen.timestamps)
+        # la selección se reajusta a la nueva rejilla (hacia fuera) y se refleja en las teselas
+        before = list(doc.selection.segments)
+        doc.selection.resnap(gen.timestamps, S, doc.info.duration)
+        if doc.selection.segments != before:
+            doc.save_selection()
+        self.sheet.set_selected(doc.selection.tiles(gen.timestamps, S, doc.info.duration))
         self.scroller.get_vadjustment().set_value(0)
         gen.start()
         self._refresh_status()
@@ -1389,9 +1531,9 @@ class ThumbSheet(Gtk.Window):
     # ---- estado y botones ----------------------------------------------------------------------
     def _segments(self):
         doc = self.current
-        if not doc or not doc.info or not self.generator or not doc.selected:
+        if not doc or not doc.info or not self.generator:
             return []
-        return selection_segments(doc.selected, self.generator.timestamps, self.generator.S, doc.info.duration)
+        return list(doc.selection.segments)
 
     def _refresh_status(self):
         doc = self.current
@@ -1429,11 +1571,107 @@ class ThumbSheet(Gtk.Window):
         self.del_btn.set_sensitive(doc is not None)
         self.llc_btn.set_sensitive(bool(doc is not None and doc.info is not None and self._segments()))
 
-    def on_selection_changed(self):
+    # ---- selección (clic / arrastre sobre teselas → segmentos) ----------------------------------
+    def _grid(self):
+        return self.generator.timestamps, self.generator.S, self.current.info.duration
+
+    def on_drag_begin(self):
+        self._sel_snapshot = self.current.selection.copy() if self.current else None
+
+    def on_drag_apply(self, timestamps, mode):
+        doc = self.current
+        if doc is None or doc.info is None or not self.generator or self._sel_snapshot is None:
+            return
+        ts_all, S, dur = self._grid()
+        sel = self._sel_snapshot.copy()
+        for t in timestamps:
+            a, b = Selection.tile_range(t, S, dur)
+            if mode:
+                sel.add(a, b)
+            else:
+                sel.remove(a, b)
+        doc.selection = sel
+        self.sheet.set_selected(sel.tiles(ts_all, S, dur))
+
+    def on_drag_end(self):
+        self._sel_snapshot = None
         if self.current is not None:
             self.current.save_selection()
         self._refresh_status()
         self._update_buttons()
+
+    def clear_selection(self):
+        doc = self.current
+        if doc is None or not doc.selection:
+            return
+        doc.selection = Selection()
+        self.sheet.set_selected(set())
+        doc.save_selection()
+        self._refresh_status()
+        self._update_buttons()
+
+    # ---- vista ampliada (clic derecho) -----------------------------------------------------------
+    def show_preview(self, t):
+        doc = self.current
+        if doc is None or doc.info is None:
+            return
+        self._preview_key = (doc, t)
+        pb = self.sheet.cache.get(t)
+        thumb = doc.cache_dir / ("%d.jpg" % t)
+        if pb is None and thumb.exists():
+            try:
+                pb = GdkPixbuf.Pixbuf.new_from_file(str(thumb))
+            except GLib.Error:
+                pb = None
+        self.preview.set_frame(pb, t, doc.path.name)
+        self.preview.show()
+        full = doc.cache_dir / "full" / ("%d.jpg" % t)
+        if full.exists():
+            self._preview_loaded(doc, t, full)
+        else:
+            threading.Thread(target=self._extract_full, args=(doc, t, full), name="ts-full", daemon=True).start()
+
+    def _extract_full(self, doc, t, full):
+        """Fotograma a resolución nativa, en un ffmpeg aparte (0,1–0,3 s); queda en la caché (full/)."""
+        try:
+            full.parent.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return
+        tmp = full.with_name(".%d.tmp.jpg" % t)
+        cmd = FFMPEG + FULL_DEC + ["-ss", str(t), "-i", str(doc.path), "-map", "0:v:0", "-an", "-sn", "-dn",
+                                   "-frames:v", "1", "-q:v", "3", "-f", "image2", "-update", "1", "-y", str(tmp)]
+        try:
+            r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=FF_ENV,
+                               timeout=60, preexec_fn=PREEXEC)
+            ok = r.returncode == 0 and tmp.exists()
+        except (OSError, subprocess.TimeoutExpired):
+            ok = False
+        if ok:
+            os.replace(str(tmp), str(full))
+            GLib.idle_add(self._preview_loaded, doc, t, full)
+        else:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+    def _preview_loaded(self, doc, t, full):
+        if self._preview_key != (doc, t) or not self.preview.get_visible():
+            return False
+        alloc = self.preview.get_allocation()
+        w, h = max(64, alloc.width), max(64, alloc.height)
+        try:
+            # decodificado ya al tamaño en que se va a ver (libjpeg escala por DCT: barato y nítido)
+            pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(full), w, h, True)
+        except GLib.Error:
+            return False
+        self.preview.set_frame(pb, t, doc.path.name)
+        return False
+
+    def hide_preview(self):
+        self._preview_key = None
+        if self.preview.get_visible():
+            self.preview.hide()
 
     # ---- LLC ------------------------------------------------------------------------------------
     def on_llc(self, *_):
@@ -1480,6 +1718,7 @@ class ThumbSheet(Gtk.Window):
         dlg.destroy()
         if resp != Gtk.ResponseType.ACCEPT:
             return
+        self.hide_preview()
         if self.generator:
             self.generator.cancel()
             self.generator = None
@@ -1567,7 +1806,10 @@ class ThumbSheet(Gtk.Window):
     def on_key(self, widget, event):
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
         if event.keyval == Gdk.KEY_Escape:
-            self.sheet.clear_selection()
+            if self.preview.get_visible():
+                self.hide_preview()
+            else:
+                self.clear_selection()
             return True
         if ctrl and event.keyval in (Gdk.KEY_q, Gdk.KEY_w):
             self.destroy()

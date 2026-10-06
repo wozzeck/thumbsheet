@@ -55,7 +55,7 @@ CACHE_ROOT = pathlib.Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / A
 CONFIG_FILE = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / APP / "settings.json"
 
 THUMB_MAX = int(os.environ.get("THUMBSHEET_THUMB_PX", "480"))     # lado mayor de la miniatura guardada
-INTERVALS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600]     # valores del slider de intervalo (s)
+INTERVALS = [1, 2, 5, 10, 20, 30, 60, 120, 300, 600]     # valores del slider de intervalo (s)
 INTERVAL_DEF = 30
 COLS_MIN, COLS_MAX, COLS_DEF = 3, 20, 6                     # teselas por fila
 PIX_BUDGET = int(os.environ.get("THUMBSHEET_PIX_MB", "64")) * 1024 * 1024
@@ -1813,7 +1813,7 @@ class ThumbSheet(Gtk.Window):
             self.interval_scale.add_mark(i, Gtk.PositionType.BOTTOM, interval_mark(sec))
         self.interval_scale.set_hexpand(True)
         self.interval_scale.set_value(INTERVALS.index(interval))
-        self.interval_scale.set_tooltip_text("Tiempo entre capturas: 1 s, 2 s, 5 s, 10 s, 15 s, 30 s, 1, 2, 5 o 10 min (rueda = un paso)")
+        self.interval_scale.set_tooltip_text("Tiempo entre capturas: 1 s, 2 s, 5 s, 10 s, 20 s, 30 s, 1, 2, 5 o 10 min (rueda = un paso)")
         bar.pack_start(self.interval_scale, True, True, 0)
         self.interval_label = Gtk.Label(label="")
         self.interval_label.set_width_chars(6)

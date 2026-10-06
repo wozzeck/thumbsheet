@@ -1,7 +1,7 @@
 # thumbsheet
 
 Sábana de miniaturas de vídeo para Linux (GTK3). Abres uno o varios vídeos y aparece un mosaico con
-una captura cada N segundos. Controles: **Intervalo** (1 s, 2 s, 5, 10, 15, 30 s, 1, 2, 5 o 10 min),
+una captura cada N segundos. Controles: **Intervalo** (1 s, 2 s, 5, 10, 20, 30 s, 1, 2, 5 o 10 min),
 **Tamaño** (teselas por fila, de 3 a 20; el ancho se adapta a la ventana), y a la derecha del contador
 los botones **Cortar**, **LLC** y **Eliminar**. Al cambiar el tamaño o el intervalo, la tesela que estaba
 en el centro del visor sigue en el centro.

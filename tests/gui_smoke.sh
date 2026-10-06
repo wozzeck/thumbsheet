@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Humo de la GUI en un Xvfb propio (no toca el DISPLAY real). Abre una COPIA del vídeo A y el vídeo B, y con
+# Humo de la GUI en un Xvfb propio (no toca el DISPLAY real). Abre COPIAS de los vídeos A y B (ambas se
+# borran durante la prueba; los originales no se tocan), y con
 # xdotool recorre: rueda sobre el slider de intervalo, clic/arrastre/Shift+clic/doble clic de teselas, LLC
 # (y un error forzado → toast rojo), Cortar sin pérdida, cambio de intervalo sin alterar segmentos, vista
 # ampliada (flechas, reproducción muda, seek), cambio de vídeo, centrado al cambiar columnas, Escape,
@@ -7,9 +8,10 @@
 # en plena generación sin huérfanos. Capturas PNG en `out`.
 # Las expectativas se calculan a partir del intervalo (S) y las columnas (COLS) reales. El vídeo A debe
 # tener keyframes cada 6 s (grabación de Teams) para la comprobación del corte.
-# Uso: tests/gui_smoke.sh <vídeo A (se COPIA y la copia se borra)> <vídeo B (sólo lectura)> [dir_salida]
+# Uso: tests/gui_smoke.sh <vídeo A> <vídeo B> [dir_salida]
 set -euo pipefail
-VIDEO_A="$1"; VIDEO_B="$2"; OUT="${3:-/tmp/thumbsheet-gui}"; mkdir -p "$OUT/video"
+VIDEO_A="$1"; VIDEO_B_ORIG="$2"; OUT="${3:-/tmp/thumbsheet-gui}"; mkdir -p "$OUT/video"
+VIDEO_B="$OUT/video/copia-$(basename "$VIDEO_B_ORIG")"; cp -f "$VIDEO_B_ORIG" "$VIDEO_B"
 DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 export DISPLAY=:77
 export XDG_CACHE_HOME="$OUT/cache" XDG_CONFIG_HOME="$OUT/config"   # no tocar la caché ni los ajustes reales
@@ -77,7 +79,7 @@ xdotool mousemove $((X+CX)) $((Y+CY)) click 1; shot 4a-dialogo-cortar 1; xdotool
 for i in $(seq 1 60); do grep -q "cut: hecho\|cut: error" "$OUT/app.log" && break; sleep 0.5; done
 CUT="$OUT/video/copia-$(basename "${VIDEO_A%.*}")-cortado.mp4"
 if [[ -f "$CUT" ]]; then CD=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$CUT"); python3 -c "import sys; d=float(sys.argv[1]); a=int(sys.argv[2]); b=int(sys.argv[3]); ea=a-a%6; eb=b+(-b)%6; sys.exit(0 if abs(d-(eb-ea))<=4 else 1)" "$CD" "$A" "$B" && ok "corte sin pérdida: $(basename "$CUT") dura ${CD%.*} s (keyframes alrededor de $A–$B)" || ko "duración del corte inesperada: $CD"; else ko "no existe $CUT: $(grep 'cut:' "$OUT/app.log" | tail -1)"; fi
-grep -q "toast ok: Cortado" "$OUT/app.log" && ok "toast verde al terminar el corte (y se añade al panel)" || ko "sin toast ok del corte"
+grep -q "toast ok: Cortado" "$OUT/app.log" && ok "toast verde al terminar el corte" || ko "sin toast ok del corte"
 shot 4a2-tras-cortar 0.8
 
 # 5. cambiar de intervalo no toca los segmentos guardados
@@ -162,18 +164,16 @@ for i in $(seq 1 60); do grep -q "cut: original borrado\|cut: error" "$OUT/app.l
 grep -q "toast ok: Cortado.*original borrado" "$OUT/app.log" && ok "toast verde: cortado y original borrado" || ko "sin toast de cortado+borrado: $(grep 'toast' "$OUT/app.log" | tail -1)"
 sleep 2; shot 10b-tras-cortar-borrar 0.5
 [[ "$(grep -c "vídeo: $(basename "$VIDEO_B")" "$OUT/app.log" || true)" -gt "$NV" && "$(shown)" == "$(basename "$VIDEO_B")" ]] && ok "el original sale del panel y se abre el siguiente de la lista ($(basename "$VIDEO_B"))" || ko "tras cortar y borrar se muestra '$(shown)'"
-for i in $(seq 1 20); do grep -q "segundo plano: $(basename "$CUT")\|vídeo: $(basename "$CUT")" "$OUT/app.log" && break; sleep 0.5; done
-grep -q "segundo plano: $(basename "$CUT")\|vídeo: $(basename "$CUT")" "$OUT/app.log" && ok "el cortado (resondeado) está en el panel" || ko "el cortado no aparece en el panel"
+sleep 1.5; grep -q "segundo plano: $(basename "$CUT")\|vídeo: $(basename "$CUT")\|estado: $(basename "$CUT")" "$OUT/app.log" && ko "el cortado se añadió al panel" || ok "los cortados no se añaden al panel (ninguno de los dos)"
 
-# 11. Eliminar con confirmación (Alt+E en el diálogo) sobre el cortado (2.ª fila). Nunca sobre el vídeo B,
-#     que es un fichero real: sólo se pulsa Eliminar si el que está a la vista es el cortado.
-xdotool mousemove $((X+${ROW2%,*})) $((Y+${ROW2#*,})) click 1; sleep 1.5
-if [[ "$(shown)" == "$(basename "$CUT")" ]]; then
+# 11. Eliminar con confirmación (Alt+E en el diálogo) sobre el vídeo a la vista: la copia de B (la lista
+#     queda vacía). Sólo se pulsa si lo que está a la vista es efectivamente la copia.
+if [[ "$(shown)" == "$(basename "$VIDEO_B")" ]]; then
   xdotool mousemove $((X+DX)) $((Y+DY)) click 1; shot 10-dialogo-eliminar 1
   xdotool key alt+e; sleep 1.2
-  [[ ! -f "$CUT" ]] && ok "archivo eliminado del disco" || ko "el archivo sigue existiendo"
-else ko "Eliminar omitido: a la vista está '$(shown)', no el cortado"; fi
-[[ -f "$VIDEO_B" ]] || { echo "¡¡el vídeo B ha desaparecido!!"; fail=1; }
+  [[ ! -f "$VIDEO_B" ]] && ok "archivo eliminado del disco (copia de B); la lista queda vacía" || ko "el archivo sigue existiendo"
+else ko "Eliminar omitido: a la vista está '$(shown)', no la copia de B"; fi
+[[ -f "$VIDEO_B_ORIG" && -f "$VIDEO_A" ]] || { echo "¡¡un vídeo ORIGINAL ha desaparecido!!"; fail=1; }
 grep -q "toast ok: Eliminado" "$OUT/app.log" && ok "toast verde al eliminar" || ko "sin toast ok al eliminar"
 shot 11-tras-eliminar 1
 

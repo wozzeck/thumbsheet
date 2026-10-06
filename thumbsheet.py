@@ -2809,7 +2809,7 @@ class ThumbSheet(Gtk.Window):
             txt = "Cortado: %s · %d segmento%s · %s%s" % (out.name, len(job["final"]), "" if len(job["final"]) == 1 else "s",
                                                           fmt_time(duration if duration is not None else job["expected"]), extra)
             log("cut: hecho %s dur=%s esperado=%.2f" % (out.name, duration, job["expected"]))
-            self._add_output(out)
+            self._refresh_output(out)
             if duration is not None and abs(duration - job["expected"]) > max(2.0, 0.03 * job["expected"]):
                 self._error(txt, "La duración del resultado (%s) no coincide con la esperada (%s): revisa el fichero.%s" % (
                     fmt_time(duration), fmt_time(job["expected"]), " El original se conserva." if job["delete"] else ""))
@@ -2824,15 +2824,16 @@ class ThumbSheet(Gtk.Window):
                 self._flash(txt)
         return False
 
-    def _add_output(self, out):
-        """Añade el fichero cortado al panel. Si ya estaba cargado (se ha sobrescrito), lo quita y lo vuelve a
-        añadir para que se sondee de nuevo: tamaño y fecha nuevos, otra caché."""
+    def _refresh_output(self, out):
+        """El fichero cortado NO se añade al panel. Pero si ya estaba cargado (se ha sobrescrito), se quita y
+        se vuelve a añadir para que se sondee de nuevo: tamaño y fecha nuevos, otra caché."""
         old = next((d for d in self.docs if d.path == out), None)
-        if old is not None:
-            if self.generator is not None and self.gen_doc is old:
-                self.generator.cancel()
-                self.generator = None
-            self._remove_doc(old, show_next=False)
+        if old is None:
+            return
+        if self.generator is not None and self.gen_doc is old:
+            self.generator.cancel()
+            self.generator = None
+        self._remove_doc(old, show_next=False)
         self.add_paths([str(out)])
 
     # ---- eliminar -------------------------------------------------------------------------------

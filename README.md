@@ -59,8 +59,8 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
     `ffprobe` leyendo sólo ventanas alrededor de cada borde, no el fichero entero. Tarda lo que tarde el
     disco en copiar.
   - *Exacto al fotograma*: recodifica (H.264 CRF 20 + AAC). Preciso, pero recomprime y es lento.
-  El progreso se ve en el contador, el botón pasa a "Cancelar" mientras dura, y el resultado se añade
-  al panel (si ya estaba cargado, se vuelve a sondear). El botón de la derecha del diálogo, **Cortar y
+  El progreso se ve en el contador y el botón pasa a "Cancelar" mientras dura. El resultado queda junto
+  al original y no se añade al panel (si ya estaba cargado, se vuelve a sondear porque ha cambiado). El botón de la derecha del diálogo, **Cortar y
   borrar original**, hace las dos cosas de una vez: hay que pulsarlo dos veces seguidas (la primera
   sólo lo arma, en rojo, y se desarma solo a los 5 s), y el original se borra únicamente si el corte
   termina bien y la duración del resultado cuadra. Igual que con Eliminar, el original desaparece del

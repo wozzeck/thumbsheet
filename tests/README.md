@@ -11,7 +11,7 @@
   segunda pasada no las reintenta. También prueba `eta_text`. El vídeo debe tener la cabecera `moov`
   al principio (faststart), como los de WhatsApp o Teams.
 - `gui_smoke.sh <vídeo A> <vídeo B> [out]` — abre la app en un Xvfb propio (no toca tu pantalla) con
-  una COPIA de A y con B, y con xdotool: rueda sobre el slider de intervalo, clic y arrastre de
+  COPIAS de A y de B (las dos se borran durante la prueba; los originales no se tocan), y con xdotool: rueda sobre el slider de intervalo, clic y arrastre de
   teselas, botón LLC (verifica el proyecto), Cortar, cambio de vídeo, Escape, Cortar y borrar original
   (doble pulsación: comprueba que una sola o una tardía no borran), Eliminar con confirmación, Ctrl+Q, y
   SIGKILL en plena generación. Deja capturas PNG en `out`. Requiere `Xvfb`,

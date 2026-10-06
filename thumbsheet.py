@@ -1325,6 +1325,87 @@ class PreviewLayer(Gtk.Box):
             self.on_seek(scale.get_value())
 
 
+class Toast(Gtk.Revealer):
+    """Aviso superpuesto abajo en el centro. Verde = operación correcta, se oculta a los 3 s. Rojo = error,
+    permanente, con el texto seleccionable y botones Copiar y cerrar."""
+
+    OK_MS = 3000
+
+    def __init__(self):
+        super(Toast, self).__init__()
+        self.set_transition_type(Gtk.RevealerTransitionType.SLIDE_UP)
+        self.set_transition_duration(180)
+        self.set_halign(Gtk.Align.CENTER)
+        self.set_valign(Gtk.Align.END)
+        self.set_margin_bottom(28)
+        self._hide_id = None
+        self.is_error = False
+        self.box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.box.get_style_context().add_class("ts-toast")
+        self.label = Gtk.Label(label="")
+        self.label.set_line_wrap(True)
+        self.label.set_max_width_chars(90)
+        self.label.set_xalign(0.0)
+        self.box.pack_start(self.label, True, True, 0)
+        self.copy_btn = Gtk.Button(label="Copiar")
+        self.copy_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self.copy_btn.set_tooltip_text("Copiar el mensaje al portapapeles")
+        self.copy_btn.connect("clicked", self._copy)
+        self.box.pack_start(self.copy_btn, False, False, 0)
+        self.close_btn = Gtk.Button()
+        self.close_btn.add(Gtk.Image.new_from_icon_name("window-close-symbolic", Gtk.IconSize.BUTTON))
+        self.close_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self.close_btn.set_tooltip_text("Cerrar (Esc)")
+        self.close_btn.connect("clicked", lambda *_: self.dismiss())
+        self.box.pack_start(self.close_btn, False, False, 0)
+        self.add(self.box)
+        self.box.show_all()
+        self.set_reveal_child(False)
+        self.show()
+
+    def _show(self, text, error):
+        if self._hide_id:
+            GLib.source_remove(self._hide_id)
+            self._hide_id = None
+        self.is_error = error
+        ctx = self.box.get_style_context()
+        ctx.remove_class("ts-toast-ok")
+        ctx.remove_class("ts-toast-err")
+        ctx.add_class("ts-toast-err" if error else "ts-toast-ok")
+        self.label.set_text(text)
+        self.label.set_selectable(error)
+        self.copy_btn.set_visible(error)
+        self.close_btn.set_visible(error)
+        self.set_reveal_child(True)
+        if not error:
+            self._hide_id = GLib.timeout_add(self.OK_MS, self._timeout)
+        log("toast %s: %s" % ("error" if error else "ok", text.replace("\n", " | ")))
+
+    def show_ok(self, text):
+        self._show(text, False)
+
+    def show_error(self, text):
+        self._show(text, True)
+
+    def _timeout(self):
+        self._hide_id = None
+        self.set_reveal_child(False)
+        return False
+
+    def dismiss(self):
+        if self._hide_id:
+            GLib.source_remove(self._hide_id)
+            self._hide_id = None
+        self.set_reveal_child(False)
+
+    @property
+    def visible_error(self):
+        return self.is_error and self.get_reveal_child()
+
+    def _copy(self, *_):
+        Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(self.label.get_text(), -1)
+
+
 # ----------------------------------------------------------------------------------------------
 # selección → segmentos → proyecto de LosslessCut
 # ----------------------------------------------------------------------------------------------
@@ -1628,7 +1709,6 @@ class ThumbSheet(Gtk.Window):
         self.current = None
         self.generator = None
         self._regen_id = None
-        self._flash_id = None
         self._status_base = ""
         self._progress = (0, 0)
         self._wheel_acc = {}
@@ -1725,6 +1805,8 @@ class ThumbSheet(Gtk.Window):
         self.layer.on_toggle_play = self.toggle_play
         self.layer.on_seek = self.preview_seek
         self.overlay.add_overlay(self.layer)
+        self.toast = Toast()
+        self.overlay.add_overlay(self.toast)
         self._preview_key = None
         self.player = None
         self._player_doc = None
@@ -1950,19 +2032,11 @@ class ThumbSheet(Gtk.Window):
         if n:
             base += " · %d segmento%s" % (n, "" if n == 1 else "s")
         self._status_base = base
-        if self._flash_id is None:
-            self.status.set_text(base)
+        self.status.set_text(base)
 
     def _flash(self, text):
-        if self._flash_id is not None:
-            GLib.source_remove(self._flash_id)
-        self.status.set_text(text)
-        self._flash_id = GLib.timeout_add(self.FLASH_MS, self._unflash)
-
-    def _unflash(self):
-        self._flash_id = None
-        self.status.set_text(self._status_base)
-        return False
+        """Aviso de operación correcta (toast verde, 3 s)."""
+        self.toast.show_ok(text)
 
     def _update_buttons(self):
         doc = self.current
@@ -2239,9 +2313,9 @@ class ThumbSheet(Gtk.Window):
         try:
             write_llc_project(doc.path, segs)
         except OSError as e:
-            self._error("No se pudo guardar el proyecto", "%s\n\n%s" % (proj, e))
+            self._error("No se pudo guardar el proyecto LLC", "%s\n%s" % (proj, e))
             return
-        self._flash("Guardado %s · %d segmento%s" % (proj.name, len(segs), "" if len(segs) == 1 else "s"))
+        self._flash("Proyecto LLC guardado: %s · %d segmento%s" % (proj.name, len(segs), "" if len(segs) == 1 else "s"))
 
     # ---- cortar y unir ----------------------------------------------------------------------------
     def on_cut(self, *_):
@@ -2384,16 +2458,18 @@ class ThumbSheet(Gtk.Window):
             self._flash("Corte cancelado")
             log("cut: cancelado")
         elif error:
-            self._error("No se pudo cortar", "%s\n\n%s" % (out, error))
+            self._error("No se pudo cortar: %s" % out.name, error)
             log("cut: error", error)
         else:
             added = job["expected"] - sum(b - a for a, b in job["segments"])
             extra = " (+%.1f s por keyframes)" % added if added > 0.05 else ""
-            txt = "Guardado %s · %d segmento%s · %s%s" % (out.name, len(job["final"]), "" if len(job["final"]) == 1 else "s",
-                                                           fmt_time(duration if duration is not None else job["expected"]), extra)
+            txt = "Cortado: %s · %d segmento%s · %s%s" % (out.name, len(job["final"]), "" if len(job["final"]) == 1 else "s",
+                                                          fmt_time(duration if duration is not None else job["expected"]), extra)
             if duration is not None and abs(duration - job["expected"]) > max(2.0, 0.03 * job["expected"]):
-                txt += " · duración inesperada"
-            self._flash(txt)
+                self._error(txt, "La duración del resultado (%s) no coincide con la esperada (%s): revisa el fichero." % (
+                    fmt_time(duration), fmt_time(job["expected"])))
+            else:
+                self._flash(txt)
             log("cut: hecho %s dur=%s esperado=%.2f" % (out.name, duration, job["expected"]))
             self.add_paths([str(out)])
         return False
@@ -2425,12 +2501,12 @@ class ThumbSheet(Gtk.Window):
         try:
             os.remove(str(doc.path))
         except OSError as e:
-            self._error("No se pudo eliminar el archivo", "%s\n\n%s" % (doc.path, e))
+            self._error("No se pudo eliminar el archivo", "%s\n%s" % (doc.path, e))
             return
         if doc.cache_dir:
             shutil.rmtree(str(doc.cache_dir), ignore_errors=True)
         self._remove_doc(doc)
-        self._flash("Eliminado %s" % doc.path.name)
+        self._flash("Eliminado: %s" % doc.path.name)
 
     def _remove_doc(self, doc):
         idx = self.docs.index(doc)
@@ -2447,12 +2523,9 @@ class ThumbSheet(Gtk.Window):
         else:
             self._load_current()
 
-    def _error(self, text, secondary):
-        dlg = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.ERROR,
-                                buttons=Gtk.ButtonsType.CLOSE, text=text)
-        dlg.format_secondary_text(secondary)
-        dlg.run()
-        dlg.destroy()
+    def _error(self, text, secondary=""):
+        """Aviso de error (toast rojo permanente, texto copiable)."""
+        self.toast.show_error(("%s\n%s" % (text, secondary)) if secondary else text)
 
     # ---- controles --------------------------------------------------------------------------------
     def _update_labels(self):
@@ -2506,7 +2579,9 @@ class ThumbSheet(Gtk.Window):
     def on_key(self, widget, event):
         ctrl = event.state & Gdk.ModifierType.CONTROL_MASK
         if event.keyval == Gdk.KEY_Escape:
-            if self.layer.get_visible():
+            if self.toast.visible_error:
+                self.toast.dismiss()
+            elif self.layer.get_visible():
                 self.hide_preview()
             else:
                 self.clear_selection()
@@ -2599,6 +2674,11 @@ def main(argv):
         .ts-preview-bar { background-color: #1a1a1c; padding: 4px 8px; }
         .ts-preview-bar label, .ts-preview-bar button { color: #e8e8ec; }
         .ts-black { background-color: #000000; }
+        .ts-toast { border-radius: 8px; padding: 10px 14px; box-shadow: 0 2px 10px rgba(0,0,0,0.55); }
+        .ts-toast-ok { background-color: #2e7d32; }
+        .ts-toast-err { background-color: #c62828; }
+        .ts-toast label, .ts-toast button { color: #ffffff; }
+        .ts-toast label selection { background-color: #ffffff; color: #c62828; }
     """)
     Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
     for tool in ("ffmpeg", "ffprobe"):

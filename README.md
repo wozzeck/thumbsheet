@@ -47,6 +47,9 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   El progreso se ve en el contador, el botón pasa a "Cancelar" mientras dura, y el resultado se añade
   al panel.
 - **Eliminar**: borra el archivo de vídeo del disco directamente, sin papelera, tras confirmar.
+- **Avisos**: Cortar, LLC y Eliminar informan con un *toast* sobre el mosaico. Verde si ha ido bien,
+  desaparece a los 3 s. Rojo si hubo un error: se queda hasta que lo cierres (`×` o `Esc`), con el texto
+  seleccionable y un botón Copiar para pegar el mensaje donde haga falta.
 
 El intervalo va **de 5 en 5** (5, 10, 15 … 300). Así todas las capturas caen en segundos múltiplos
 de 5 y se conservan al cambiar el intervalo: pasar de 30 s a 60 s no genera nada, y de 30 s a 10 s

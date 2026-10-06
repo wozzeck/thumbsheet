@@ -51,6 +51,13 @@ LLC="$OUT/video/copia-$(basename "${VIDEO_A%.*}")-proj.llc"
 if [[ -f "$LLC" ]]; then ok "proyecto LLC creado: $(basename "$LLC")"; cat "$LLC"; python3 -c "
 import json,sys; d=json.load(open(sys.argv[1])); assert d['version']==2 and d['cutSegments']==[{'start':200,'end':360,'name':''}], d" "$LLC" && ok "segmento 200–360 (4 teselas de 40 s)" || ko "contenido LLC inesperado"; else ko "no existe $LLC"; fi
 shot 4-llc 0.5
+grep -q "toast ok: Proyecto LLC guardado" "$OUT/app.log" && ok "toast verde al guardar el LLC" || ko "sin toast ok del LLC"
+# error forzado: proyecto de sólo lectura → confirmación de sobrescritura (Alt+S) → toast rojo permanente; Esc lo cierra
+chmod a-w "$LLC"; xdotool mousemove $((X+LX)) $((Y+LY)) click 1; sleep 0.8; xdotool key alt+s; shot 4-llc-error 1
+grep -q "toast error: No se pudo guardar el proyecto LLC" "$OUT/app.log" && ok "toast rojo al fallar el LLC (permiso denegado)" || ko "sin toast de error del LLC"
+xdotool windowfocus --sync "$WID"; xdotool key Escape; sleep 0.4; chmod u+w "$LLC"
+S_e=$(cat "$SEL"/*/selection.json 2>/dev/null | head -1)
+[[ "$S_e" == '{"segments": [[200, 360]]}' ]] && ok "Esc cierra el toast de error sin tocar la selección" || ko "Esc con toast alteró la selección: $S_e"
 # Cortar (sin pérdida): 200–360 se amplía a keyframes (GOP 6 s → 198–360) y se une en <copia>-cortado.mp4
 xdotool mousemove $((X+CX)) $((Y+CY)) click 1; shot 4a-dialogo-cortar 1; xdotool key Return
 for i in $(seq 1 60); do grep -q "cut: hecho\|cut: error" "$OUT/app.log" && break; sleep 0.5; done

@@ -132,6 +132,19 @@ def fmt_time(t):
     return "%d:%02d:%02d" % (h, m, s) if h else "%d:%02d" % (m, s)
 
 
+def eta_text(started, done, remaining):
+    """' · faltan ~m:ss' estimado con el ritmo medio desde `started` (time.time()); vacío hasta tener base."""
+    if not started or done < 2 or remaining <= 0:
+        return ""
+    elapsed = time.time() - started
+    if elapsed < 1.5:
+        return ""
+    eta = elapsed * remaining / float(done)
+    if eta >= 90:
+        eta = math.ceil(eta / 10.0) * 10   # con minutos por delante, en pasos de 10 s para que no baile
+    return " · faltan ~%s" % fmt_time(eta)
+
+
 def _nice_prefix():
     pre = ["nice", "-n", "10"] if shutil.which("nice") else []
     if shutil.which("ionice"):
@@ -386,20 +399,25 @@ def doc_complete(doc, interval):
     """¿Están ya en caché todas las capturas de este vídeo para este intervalo?"""
     if doc.info is None or doc.cache_dir is None:
         return True
-    return all((doc.cache_dir / ("%d.jpg" % t)).exists() for t in plan_timestamps(doc.info.duration, interval))
+    return all((doc.cache_dir / ("%d.jpg" % t)).exists() or (doc.cache_dir / ("%d.fail" % t)).exists()
+               for t in plan_timestamps(doc.info.duration, interval))
 
 
 class Generator(object):
-    """Genera las capturas de un intervalo dado. Avisa por GLib.idle_add: on_tile(t), on_progress(done, total),
-    on_done(). Cancelable (mata los ffmpeg en marcha)."""
+    """Genera las capturas de un intervalo dado. Avisa por GLib.idle_add: on_tile(t), on_failed(t) (no hay
+    fotograma que sacar: datos truncados o dañados, queda marcado con <t>.fail y no se reintenta),
+    on_progress(done, total), on_done(). Cancelable (mata los ffmpeg en marcha)."""
 
     GPU_WORKERS = 2
 
-    def __init__(self, info, cache_dir, interval, on_tile, on_progress, on_done):
+    def __init__(self, info, cache_dir, interval, on_tile, on_progress, on_done, on_failed=None):
         self.info = info
         self.cache_dir = cache_dir
         self.S = snap_interval(interval)
         self.on_tile, self.on_progress, self.on_done = on_tile, on_progress, on_done
+        self.on_failed = on_failed or (lambda t: False)
+        self.initial_done = 0      # capturas que ya estaban en caché al arrancar (para estimar el ritmo)
+        self.eta_logged = False
         self.cancelled = threading.Event()
         self.lock = threading.Lock()
         self.procs = set()
@@ -422,18 +440,23 @@ class Generator(object):
 
     # --- API ---
     def start(self):
-        cached = set()
+        cached, failed = set(), set()
         try:
             for name in os.listdir(str(self.cache_dir)):
                 if name.endswith(".jpg") and name[:-4].isdigit():
                     cached.add(int(name[:-4]))
+                elif name.endswith(".fail") and name[:-5].isdigit():
+                    failed.add(int(name[:-5]))
         except OSError:
             pass
-        missing = [t for t in self.timestamps if t not in cached]
-        self.done_count = self.total - len(missing)
+        failed -= cached
+        missing = [t for t in self.timestamps if t not in cached and t not in failed]
+        self.done_count = self.initial_done = self.total - len(missing)
         for t in self.timestamps:
             if t in cached:
                 self.on_tile(t)
+            elif t in failed:
+                self.on_failed(t)   # ya se intentó y no hay fotograma: no se reintenta
         self._progress()
         if not missing:
             self._finish()
@@ -583,7 +606,9 @@ class Generator(object):
                 tmp.unlink()
             except OSError:
                 pass
-            self._tile_failed(t)
+            # ffmpeg ha terminado por sí mismo sin sacar fotograma (datos truncados o dañados): definitivo.
+            # Si lo mató una señal ajena (OOM…) no se marca, para que otra pasada lo reintente.
+            self._tile_failed(t, permanent=p.returncode is not None and p.returncode >= 0)
         return ok
 
     def _do_range(self, ts, dev):
@@ -637,8 +662,12 @@ class Generator(object):
             if dev is not None and not (ok and published == n):
                 # la GPU sólo cuenta como OK si ha producido todo; si no, la CPU rehace lo que falte
                 return False
+            # lo que el tramo no ha producido (datos truncados o dañados) se reintenta una a una con seek;
+            # lo que tampoco salga así queda marcado como no generable
             for i in range(published, n):
-                self._tile_failed(ts[i])
+                if self.cancelled.is_set():
+                    return False
+                self._do_seek(ts[i])
             return ok
         finally:
             shutil.rmtree(str(tmpdir), ignore_errors=True)
@@ -647,7 +676,7 @@ class Generator(object):
         try:
             os.replace(str(src), str(self.cache_dir / ("%d.jpg" % t)))
         except OSError:
-            self._tile_failed(t)
+            self._tile_failed(t, permanent=False)
             return
         self._tile_ready(t)
 
@@ -657,7 +686,15 @@ class Generator(object):
         GLib.idle_add(self.on_tile, t)
         self._progress()
 
-    def _tile_failed(self, t):
+    def _tile_failed(self, t, permanent=True):
+        if self.cancelled.is_set():
+            return
+        if permanent:
+            try:
+                (self.cache_dir / ("%d.fail" % t)).touch()
+            except OSError:
+                pass
+            GLib.idle_add(self.on_failed, t)
         with self.lock:
             self.done_count += 1
         self._progress()
@@ -773,6 +810,7 @@ class Sheet(Gtk.DrawingArea):
         self.ts = []
         self.index = {}
         self.ready = set()
+        self.failed = set()        # instantes sin fotograma posible (aspa roja)
         self.failed_all = False
         self.aspect = 16.0 / 9.0
         self.cols_wanted = COLS_DEF
@@ -928,11 +966,18 @@ class Sheet(Gtk.DrawingArea):
         self.ts = list(ts)
         self.index = dict((t, i) for i, t in enumerate(self.ts))
         self.ready = set()
+        self.failed = set()
         self._relayout()
 
     def tile_ready(self, t):
         if t in self.index:
             self.ready.add(t)
+            self._redraw_tile(self.index[t])
+        return False
+
+    def tile_failed(self, t):
+        if t in self.index:
+            self.failed.add(t)
             self._redraw_tile(self.index[t])
         return False
 
@@ -1055,7 +1100,19 @@ class Sheet(Gtk.DrawingArea):
             cr.set_source_rgb(0.18, 0.18, 0.2)
             cr.rectangle(x, y, w, h)
             cr.fill()
-            if t in self.ready:
+            if t in self.failed:
+                # zona dañada o truncada: no hay fotograma que sacar
+                r = max(5.0, min(w, h) * 0.11)
+                cx, cy = x + w / 2.0, y + h / 2.0
+                cr.set_source_rgb(0.93, 0.16, 0.16)
+                cr.set_line_width(max(2.0, r / 3.0))
+                cr.set_line_cap(cairo.LINE_CAP_ROUND)
+                cr.move_to(cx - r, cy - r)
+                cr.line_to(cx + r, cy + r)
+                cr.move_to(cx + r, cy - r)
+                cr.line_to(cx - r, cy + r)
+                cr.stroke()
+            elif t in self.ready:
                 self.loader.request(t, self.cache_dir / ("%d.jpg" % t), w)
         else:
             pw, ph = pb.get_width(), pb.get_height()
@@ -1696,6 +1753,43 @@ def cut_command_exact(video_path, segments, out_path, tmp_path, has_audio):
 # ----------------------------------------------------------------------------------------------
 # documento = un vídeo abierto (sondeo, caché, selección, posición de scroll)
 # ----------------------------------------------------------------------------------------------
+class StateIcon(Gtk.DrawingArea):
+    """Icono de la segunda línea de cada fila del panel: estado de las miniaturas del vídeo para el intervalo
+    actual. Casi invisible = pendientes, traslúcido = generándose, sólido = todas en caché."""
+    SIZE = 11
+    ALPHA = {None: 0.18, "working": 0.45, "done": 1.0}
+    TIP = {None: "Miniaturas pendientes", "working": "Generando miniaturas…", "done": "Miniaturas generadas"}
+    NAME = {None: "pendientes", "working": "generando", "done": "listas"}
+
+    def __init__(self):
+        super(StateIcon, self).__init__()
+        self.state = None
+        self.set_size_request(self.SIZE, self.SIZE)
+        self.set_valign(Gtk.Align.CENTER)
+        self.set_tooltip_text(self.TIP[None])
+        self.get_style_context().add_class("dim-label")
+        self.connect("draw", self.on_draw)
+
+    def set_state(self, state):
+        """Devuelve True si ha cambiado."""
+        if state == self.state:
+            return False
+        self.state = state
+        self.set_tooltip_text(self.TIP[state])
+        self.queue_draw()
+        return True
+
+    def on_draw(self, widget, cr):
+        c = self.get_style_context().get_color(self.get_state_flags())
+        cr.set_source_rgba(c.red, c.green, c.blue, c.alpha * self.ALPHA[self.state])
+        s, g = float(self.SIZE), 1.5
+        q = (s - g) / 2.0   # cuatro cuadritos: un mosaico en miniatura
+        for x, y in ((0, 0), (q + g, 0), (0, q + g), (q + g, q + g)):
+            cr.rectangle(x, y, q, q)
+        cr.fill()
+        return False
+
+
 class Document(object):
     def __init__(self, path):
         self.path = pathlib.Path(path).resolve()
@@ -1790,6 +1884,7 @@ class ThumbSheet(Gtk.Window):
         self.docs = []
         self.current = None
         self.generator = None
+        self._tick_id = None                  # refresco periódico del tiempo estimado
         self.gen_doc = None                   # vídeo que está generando self.generator (actual o 2.º plano)
         self._cut_pct = None
         self._regen_id = None
@@ -2016,10 +2111,15 @@ class ThumbSheet(Gtk.Window):
         sub.set_xalign(0.0)
         sub.get_style_context().add_class("dim-label")
         sub.set_markup("<small>%s</small>" % GLib.markup_escape_text(doc.subtitle))
+        state = StateIcon()
+        line2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        line2.pack_start(state, False, False, 0)
+        line2.pack_start(sub, True, True, 0)
         box.pack_start(name, False, False, 0)
-        box.pack_start(sub, False, False, 0)
+        box.pack_start(line2, False, False, 0)
         row.add(box)
         row.sub_label = sub
+        row.state = state
         return row
 
     def _probe_loop(self):
@@ -2035,6 +2135,7 @@ class ThumbSheet(Gtk.Window):
             self._load_current()
         else:
             self._start_next_background()
+        self._refresh_row_states()
         return False
 
     def on_row_selected(self, listbox, row):
@@ -2086,13 +2187,17 @@ class ThumbSheet(Gtk.Window):
         holder = []
         current = lambda: self.generator is holder[0]  # noqa: E731
         on_tile = self.sheet.tile_ready if foreground else (lambda t: False)
-        gen = Generator(doc.info, doc.cache_dir, S, on_tile,
+        on_failed = self.sheet.tile_failed if foreground else (lambda t: False)
+        gen = Generator(doc.info, doc.cache_dir, S,
+                        lambda t: on_tile(t) if current() else False,
                         lambda d, n: self.on_progress(d, n) if current() else False,
-                        lambda: self.on_done() if current() else False)
+                        lambda: self.on_done() if current() else False,
+                        lambda t: on_failed(t) if current() else False)
         holder.append(gen)
         self.generator = gen
         self.gen_doc = doc
         self._progress = (0, gen.total)
+        self._refresh_row_states()
         return gen
 
     def _start_next_background(self):
@@ -2123,6 +2228,7 @@ class ThumbSheet(Gtk.Window):
         self._regen_id = None
         doc = self.current
         if not doc or not doc.info:
+            self._refresh_row_states()
             return False
         S = self.current_interval()
         for d in self.docs:
@@ -2150,6 +2256,7 @@ class ThumbSheet(Gtk.Window):
 
     def on_done(self):
         self._refresh_status()
+        self._refresh_row_states()
         GLib.idle_add(self._start_next_background)
         return False
 
@@ -2159,6 +2266,36 @@ class ThumbSheet(Gtk.Window):
         if not doc or not doc.info:
             return []
         return list(doc.selection.segments)
+
+    def _refresh_row_states(self):
+        """Icono de la segunda línea de cada fila: traslúcido mientras se generan sus miniaturas (a la vista o
+        en segundo plano), sólido cuando están todas para el intervalo actual, casi invisible si pendientes."""
+        S = self.current_interval()
+        busy = self.generator is not None and not self.generator.finished
+        for d in self.docs:
+            if d.row is None:
+                continue
+            if busy and self.gen_doc is d:
+                st = "working"
+            elif d.info is not None and doc_complete(d, S):
+                st = "done"
+            else:
+                st = None
+            if d.row.state.set_state(st) and DEBUG:
+                log("estado: %s → %s" % (d.path.name, StateIcon.NAME[st]))
+
+    def _ensure_ticker(self):
+        """Mientras hay generación o corte, refresca la barra cada segundo para que la estimación avance
+        aunque no llegue progreso."""
+        if self._tick_id is None:
+            self._tick_id = GLib.timeout_add(1000, self._tick)
+
+    def _tick(self):
+        if self._cut is None and (self.generator is None or self.generator.finished):
+            self._tick_id = None
+            return False
+        self._refresh_status()
+        return True
 
     def _refresh_status(self):
         doc = self.current
@@ -2183,15 +2320,27 @@ class ThumbSheet(Gtk.Window):
                 self.progress.set_text("Analizando keyframes…" if not self._cut["exact"] else "Preparando…")
             else:
                 self.progress.set_fraction(self._cut_pct / 100.0)
-                self.progress.set_text("Cortando… %d %%" % self._cut_pct)
+                eta = eta_text(self._cut.get("t0"), self._cut_pct, 100 - self._cut_pct)
+                if eta and not self._cut.get("eta_logged"):
+                    self._cut["eta_logged"] = True
+                    log("eta corte:%s" % eta)
+                self.progress.set_text("Cortando… %d %%%s" % (self._cut_pct, eta))
+            self._ensure_ticker()
         elif self.generator is not None and not self.generator.finished and self.generator.total:
+            gen = self.generator
             done, total = self._progress
             frac = min(1.0, done / float(total))
             self.progress.set_fraction(frac)
+            eta = eta_text(gen.started, done - gen.initial_done, total - done)
+            if eta and not gen.eta_logged:
+                gen.eta_logged = True
+                log("eta:%s" % eta)
             if self.gen_doc is self.current:
-                self.progress.set_text("%d / %d capturas" % (min(done, total), total))
+                self.progress.set_text("%d / %d capturas%s" % (min(done, total), total, eta))
             else:
-                self.progress.set_text("2.º plano: %s · %d %%" % (self.gen_doc.path.name if self.gen_doc else "?", int(frac * 100)))
+                self.progress.set_text("2.º plano: %s · %d %%%s" % (self.gen_doc.path.name if self.gen_doc else "?",
+                                                                    int(frac * 100), eta))
+            self._ensure_ticker()
         else:
             self.progress.set_fraction(1.0 if self.docs else 0.0)
             self.progress.set_text("")
@@ -2622,6 +2771,8 @@ class ThumbSheet(Gtk.Window):
 
     def _cut_progress(self, job, done):
         if self._cut is job and job["expected"] > 0:
+            if job.get("t0") is None:
+                job["t0"] = time.time()   # arranca con el primer progreso: la fase de keyframes no cuenta
             self._cut_pct = max(0, min(100, int(100 * done / job["expected"])))
             self._refresh_status()
         return False
@@ -2908,6 +3059,9 @@ def main(argv):
         .ts-toast-err { background-color: #c62828; }
         .ts-toast label, .ts-toast button { color: #ffffff; }
         .ts-toast label selection { background-color: #ffffff; color: #c62828; }
+        .dim-label { opacity: 0.8; }
+        scale marks { color: alpha(currentColor, 0.8); }
+        progressbar { color: alpha(@theme_fg_color, 0.8); }
     """)
     Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), css, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
     for tool in ("ffmpeg", "ffprobe"):

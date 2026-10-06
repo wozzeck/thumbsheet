@@ -11,13 +11,21 @@ thumbsheet vídeo.mp4 [otro.mkv ...]   # o "Abrir con" desde el gestor de archiv
 thumbsheet                            # sin argumentos: diálogo para elegir vídeos
 ```
 
-- **Varios vídeos**: se listan en el panel izquierdo (nombre, duración y resolución); clic para ver
-  cada sábana. Se añaden más con `Ctrl+O` o arrastrándolos a la ventana. Cuando el vídeo a la vista
+- **Varios vídeos**: se listan en el panel izquierdo (nombre, duración y resolución, y a la izquierda
+  de la segunda línea un icono de mosaico que indica el estado de sus miniaturas para el intervalo
+  actual: casi invisible si están pendientes, traslúcido mientras se generan, sólido cuando están
+  todas); clic para ver cada sábana. Se añaden más con `Ctrl+O` o arrastrándolos a la ventana. Cuando el vídeo a la vista
   termina de generarse, los demás se van generando **en segundo plano** al mismo intervalo, de uno en
   uno; el vídeo a la vista y los cambios de intervalo tienen siempre prioridad.
 - **Estado**: junto a los botones, arriba el mensaje (capturas, duración, resolución, segmentos) y
   abajo una barra de progreso: generación del vídeo actual, generación en segundo plano (con el nombre
-  del fichero) o avance del corte.
+  del fichero) o avance del corte, con el tiempo que falta estimado por el ritmo medio de la operación
+  (aparece en cuanto hay base para calcularlo y se refresca cada segundo).
+- **Zonas dañadas**: si de un instante no se puede sacar fotograma (vídeo truncado, datos corruptos),
+  la tesela muestra un aspa roja en lugar de quedarse en gris. Queda anotado en la caché, así que no se
+  vuelve a intentar; para reintentar, borra la caché de ese vídeo. En modo tramos, lo que un tramo no
+  produce se reintenta una a una con seek antes de darlo por imposible, para que una zona dañada no
+  arrastre a las teselas sanas de su tramo.
 - **Selección**: clic = alternar una tesela; clic y arrastrar = aplicar a un rango contiguo;
   `Shift`+clic = seleccionar todo entre la última tesela pulsada y esta; doble clic sobre una
   seleccionada = deseleccionar todo su tramo contiguo. Las seleccionadas se recuadran en rojo. `Esc`

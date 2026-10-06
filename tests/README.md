@@ -5,6 +5,11 @@
   producen el mismo fotograma. Imprime tiempos. Usa un directorio temporal, no toca la caché real.
 - `test_llc.py` — sin pantalla, instantáneo: segmentos a partir de la selección, fichero `-proj.llc`
   y ajuste del intervalo a múltiplos de 5.
+- `test_damaged.py <vídeo mp4> [fracción]` — sin pantalla. Trunca una copia del vídeo (por defecto a la
+  mitad) y comprueba, en modo seek y en modo tramos, que las capturas imposibles quedan marcadas
+  (`<t>.fail`), forman un sufijo coherente con el corte, el documento cuenta como completo y una
+  segunda pasada no las reintenta. También prueba `eta_text`. El vídeo debe tener la cabecera `moov`
+  al principio (faststart), como los de WhatsApp o Teams.
 - `gui_smoke.sh <vídeo A> <vídeo B> [out]` — abre la app en un Xvfb propio (no toca tu pantalla) con
   una COPIA de A y con B, y con xdotool: rueda sobre el slider de intervalo, clic y arrastre de
   teselas, botón LLC (verifica el proyecto), Cortar, cambio de vídeo, Escape, Cortar y borrar original

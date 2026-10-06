@@ -133,6 +133,8 @@ centrado_ok() { python3 -c "import sys; a=int(sys.argv[1]); b=int(sys.argv[2]); 
 to_cols() { local want=$1 n; xdotool mousemove $((X+TX)) $((Y+TY)) click 1; sleep 0.4
   for i in $(seq 1 24); do n=$(ncols); [[ -z "$n" ]] && n=$COLS; [[ "$n" == "$want" ]] && break
     if (( n < want )); then xdotool key Right; else xdotool key Left; fi; sleep 0.25; done; sleep 0.8; }
+grep -q "eta: · faltan" "$OUT/app.log" && ok "la barra de progreso muestra el tiempo estimado ($(grep -o 'eta: · faltan ~[0-9:]*' "$OUT/app.log" | head -1 | sed 's/eta: · //'))" || ko "sin tiempo estimado en la barra (eta:)"
+B=$(basename "$VIDEO_B"); grep -q "estado: $B → generando" "$OUT/app.log" && grep -q "estado: $B → listas" "$OUT/app.log" && ok "icono de estado del panel: $B pasó por generando → listas" || ko "icono de estado: $(grep 'estado:' "$OUT/app.log" | tail -3 | tr '\n' ';')"
 to_cols 9; shot 8-mas-columnas 0.3
 [[ "$(ncols)" == 9 ]] && centrado_ok "$(centro)" "$(ahora)" "$(ncols)" "$(S)" && ok "más columnas (9): la tesela central ($(centro) s) sigue centrada (ahora $(ahora) s)" || ko "más columnas: cols=$(ncols) centro antes $(centro) s, después $(ahora) s"
 to_cols 5; shot 9-menos-columnas 0.3

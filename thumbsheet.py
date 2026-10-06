@@ -55,8 +55,9 @@ CACHE_ROOT = pathlib.Path(os.environ.get("XDG_CACHE_HOME", HOME / ".cache")) / A
 CONFIG_FILE = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) / APP / "settings.json"
 
 THUMB_MAX = int(os.environ.get("THUMBSHEET_THUMB_PX", "480"))     # lado mayor de la miniatura guardada
-INTERVAL_MIN, INTERVAL_MAX, INTERVAL_DEF, INTERVAL_STEP = 5, 300, 30, 5
-TILE_MIN, TILE_MAX, TILE_DEF = 64, THUMB_MAX, 192
+INTERVALS = [1, 2, 5, 10, 15, 30, 60, 120, 300, 600]     # valores del slider de intervalo (s)
+INTERVAL_DEF = 30
+COLS_MIN, COLS_MAX, COLS_DEF = 3, 20, 6                     # teselas por fila
 PIX_BUDGET = int(os.environ.get("THUMBSHEET_PIX_MB", "64")) * 1024 * 1024
 DEBUG = os.environ.get("THUMBSHEET_DEBUG") == "1"
 
@@ -105,10 +106,21 @@ def default_workers():
 
 
 def snap_interval(v):
-    """Intervalo válido: múltiplo de INTERVAL_STEP dentro de [INTERVAL_MIN, INTERVAL_MAX]. Así las capturas
-    de cualquier intervalo caen en segundos múltiplos de 5 y se reutilizan al cambiar de uno a otro."""
-    v = int(round(float(v) / INTERVAL_STEP)) * INTERVAL_STEP
-    return max(INTERVAL_MIN, min(INTERVAL_MAX, v))
+    """Intervalo válido: el valor de INTERVALS más cercano. La caché va por segundo, así que las capturas
+    coincidentes entre intervalos (p. ej. 10 s y 30 s) se reutilizan."""
+    try:
+        v = float(v)
+    except (TypeError, ValueError):
+        return INTERVAL_DEF
+    return min(INTERVALS, key=lambda x: abs(x - v))
+
+
+def fmt_interval(s):
+    return "%d s" % s if s < 60 else "%d min" % (s // 60)
+
+
+def interval_mark(s):
+    return "%ds" % s if s < 60 else "%dm" % (s // 60)
 
 
 def fmt_time(t):
@@ -735,10 +747,11 @@ class Sheet(Gtk.DrawingArea):
         self.ready = set()
         self.failed_all = False
         self.aspect = 16.0 / 9.0
-        self.tile_w = TILE_DEF
-        self.cols = 1
-        self.cell_w = TILE_DEF
-        self.cell_h = int(TILE_DEF * 9 / 16)
+        self.cols_wanted = COLS_DEF
+        self.cols = COLS_DEF
+        self.cell_w = 160
+        self.cell_h = 90
+        self.vadj = None                      # ajuste vertical del ScrolledWindow (lo pone la ventana)
         self.cache = PixCache(PIX_BUDGET)
         self.visible = (0, -1)
         self.vis_lock = threading.Lock()
@@ -895,16 +908,50 @@ class Sheet(Gtk.DrawingArea):
             self._redraw_tile(self.index[t])
         return False
 
-    def set_tile_w(self, w):
-        w = int(max(TILE_MIN, min(TILE_MAX, w)))
-        if w == self.tile_w:
+    # --- posición de lectura: la tesela del centro del visor sigue en el centro al recomponer ---
+    def center_time(self):
+        """Instante de la tesela que está en el centro del visor (None si no hay plan)."""
+        if not self.ts or self.vadj is None:
+            return None
+        y = self.vadj.get_value() + self.vadj.get_page_size() / 2.0
+        rows = int(math.ceil(len(self.ts) / float(self.cols)))
+        row = int((y - self.PAD) // (self.cell_h + self.GAP))
+        row = max(0, min(rows - 1, row))
+        i = min(len(self.ts) - 1, row * self.cols + self.cols // 2)
+        return self.ts[i]
+
+    def scroll_to_time(self, t):
+        """Deja centrada la tesela más cercana a t. Se aplica ya (por si el alto no cambió) y otra vez en
+        idle, cuando el ScrolledWindow ya conoce la nueva altura y no recorta el valor."""
+        if t is None or not self.ts or self.vadj is None:
             return
-        self.tile_w = w
+        i = min(range(len(self.ts)), key=lambda k: abs(self.ts[k] - t))
+
+        def apply(final=False):
+            row = i // self.cols
+            y = self.PAD + row * (self.cell_h + self.GAP) + self.cell_h / 2.0
+            page = self.vadj.get_page_size()
+            upper = self.vadj.get_upper()
+            self.vadj.set_value(max(0.0, min(max(0.0, upper - page), y - page / 2.0)))
+            if final:
+                log("scroll: centrada t=%d (cols=%d), centro real ahora t=%s" % (self.ts[i], self.cols, self.center_time()))
+            return False
+        apply()
+        GLib.idle_add(apply, True)
+
+    def set_cols(self, n):
+        n = int(max(COLS_MIN, min(COLS_MAX, n)))
+        if n == self.cols_wanted:
+            return
+        center = self.center_time()
+        log("cols: %d -> %d, centro t=%s" % (self.cols_wanted, n, center))
+        self.cols_wanted = n
         self.settled = False
         if self._settle_id:
             GLib.source_remove(self._settle_id)
         self._settle_id = GLib.timeout_add(self.SETTLE_MS, self._settle)
         self._relayout()
+        self.scroll_to_time(center)
 
     def _settle(self):
         self._settle_id = None
@@ -916,8 +963,8 @@ class Sheet(Gtk.DrawingArea):
     def _relayout(self):
         width = max(1, self.get_allocated_width())
         avail = max(1, width - 2 * self.PAD)
-        cols = max(1, (avail + self.GAP) // (self.tile_w + self.GAP))
-        cell_w = max(TILE_MIN // 2, (avail - (cols - 1) * self.GAP) // cols)
+        cols = max(1, self.cols_wanted)
+        cell_w = max(24, (avail - (cols - 1) * self.GAP) // cols)
         cell_h = max(8, int(round(cell_w / self.aspect)))
         rows = int(math.ceil(len(self.ts) / float(cols))) if self.ts else 0
         total_h = 2 * self.PAD + rows * cell_h + max(0, rows - 1) * self.GAP
@@ -1477,7 +1524,7 @@ class Selection(object):
         if isinstance(data, dict):
             return cls([(a, b) for a, b in data.get("segments") or []])
         if isinstance(data, list):   # formato antiguo: lista de teselas sueltas; se asumen tramos de 5 s
-            return cls([(t, t + INTERVAL_STEP) for t in data])
+            return cls([(t, t + 5) for t in data])
         return cls()
 
 
@@ -1725,8 +1772,11 @@ class ThumbSheet(Gtk.Window):
                     pass
 
         interval = snap_interval(self.settings.get("interval", INTERVAL_DEF))
-        tile = int(self.settings.get("tile", TILE_DEF))
-        tile = max(TILE_MIN, min(TILE_MAX, tile))
+        try:
+            cols = int(self.settings.get("cols", COLS_DEF))
+        except (TypeError, ValueError):
+            cols = COLS_DEF
+        cols = max(COLS_MIN, min(COLS_MAX, cols))
 
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.add(vbox)
@@ -1740,14 +1790,15 @@ class ThumbSheet(Gtk.Window):
         vbox.pack_start(bar, False, False, 0)
 
         bar.pack_start(Gtk.Label(label="Intervalo"), False, False, 0)
-        self.interval_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, INTERVAL_MIN, INTERVAL_MAX, INTERVAL_STEP)
+        # el slider de intervalo recorre posiciones de INTERVALS (0..n-1), con marcas rotuladas
+        self.interval_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, len(INTERVALS) - 1, 1)
         self.interval_scale.set_draw_value(False)
         self.interval_scale.set_round_digits(0)
-        for mark in (60, 120, 180, 240):
-            self.interval_scale.add_mark(mark, Gtk.PositionType.BOTTOM, None)
+        for i, sec in enumerate(INTERVALS):
+            self.interval_scale.add_mark(i, Gtk.PositionType.BOTTOM, interval_mark(sec))
         self.interval_scale.set_hexpand(True)
-        self.interval_scale.set_value(interval)
-        self.interval_scale.set_tooltip_text("Segundos entre capturas (5–300, de 5 en 5; rueda = ±5 s)")
+        self.interval_scale.set_value(INTERVALS.index(interval))
+        self.interval_scale.set_tooltip_text("Tiempo entre capturas: 1 s, 2 s, 5 s, 10 s, 15 s, 30 s, 1, 2, 5 o 10 min (rueda = un paso)")
         bar.pack_start(self.interval_scale, True, True, 0)
         self.interval_label = Gtk.Label(label="")
         self.interval_label.set_width_chars(6)
@@ -1757,15 +1808,17 @@ class ThumbSheet(Gtk.Window):
         bar.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 6)
 
         bar.pack_start(Gtk.Label(label="Tamaño"), False, False, 0)
-        self.tile_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, TILE_MIN, TILE_MAX, 1)
+        self.tile_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, COLS_MIN, COLS_MAX, 1)
         self.tile_scale.set_draw_value(False)
         self.tile_scale.set_round_digits(0)
+        for n in (3, 5, 10, 15, 20):
+            self.tile_scale.add_mark(n, Gtk.PositionType.BOTTOM, str(n))
         self.tile_scale.set_hexpand(True)
-        self.tile_scale.set_value(tile)
-        self.tile_scale.set_tooltip_text("Ancho de cada tesela en píxeles (rueda = ±16 px; también Ctrl+rueda sobre el mosaico)")
+        self.tile_scale.set_value(cols)
+        self.tile_scale.set_tooltip_text("Teselas por fila (3–20; rueda = ±1; Ctrl+rueda sobre el mosaico)")
         bar.pack_start(self.tile_scale, True, True, 0)
         self.tile_label = Gtk.Label(label="")
-        self.tile_label.set_width_chars(7)
+        self.tile_label.set_width_chars(10)
         self.tile_label.set_xalign(0.0)
         bar.pack_start(self.tile_label, False, False, 0)
 
@@ -1828,7 +1881,8 @@ class ThumbSheet(Gtk.Window):
         self.scroller = Gtk.ScrolledWindow()
         self.scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.ALWAYS)
         self.sheet = Sheet()
-        self.sheet.set_tile_w(tile)
+        self.sheet.set_cols(cols)
+        self.sheet.vadj = self.scroller.get_vadjustment()
         self.sheet.on_drag_begin = self.on_drag_begin
         self.sheet.on_drag_apply = self.on_drag_apply
         self.sheet.on_drag_end = self.on_drag_end
@@ -1839,9 +1893,9 @@ class ThumbSheet(Gtk.Window):
         self.paned.set_position(int(self.settings.get("panel_w", 240)))
 
         self.interval_scale.connect("value-changed", self.on_interval_changed)
-        self.interval_scale.connect("scroll-event", self._slider_scroll, INTERVAL_STEP)
+        self.interval_scale.connect("scroll-event", self._slider_scroll, 1)
         self.tile_scale.connect("value-changed", self.on_tile_changed)
-        self.tile_scale.connect("scroll-event", self._slider_scroll, 16)
+        self.tile_scale.connect("scroll-event", self._slider_scroll, 1)
         self.scroller.connect("scroll-event", self.on_scroll)
         self.connect("key-press-event", self.on_key)
         self.connect("destroy", self.on_destroy)
@@ -1875,10 +1929,10 @@ class ThumbSheet(Gtk.Window):
             return "%d,%d" % (x + a.width // 2, y + a.height // 2)
         sx, sy = origin(self.sheet)
         rows = ";".join(center(d.row) for d in self.docs if d.row is not None)
-        log("geometry: sheet=%d,%d cols=%d cell=%dx%d pad=%d gap=%d interval=%s tile=%s llc=%s cut=%s del=%s rows=%s" % (
+        log("geometry: sheet=%d,%d cols=%d cell=%dx%d pad=%d gap=%d interval=%s tile=%s tilew=%d llc=%s cut=%s del=%s rows=%s" % (
             sx, sy, self.sheet.cols, self.sheet.cell_w, self.sheet.cell_h, Sheet.PAD, Sheet.GAP,
-            center(self.interval_scale), center(self.tile_scale), center(self.llc_btn), center(self.cut_btn),
-            center(self.del_btn), rows))
+            center(self.interval_scale), center(self.tile_scale), self.tile_scale.get_allocation().width,
+            center(self.llc_btn), center(self.cut_btn), center(self.del_btn), rows))
         return False
 
     # ---- documentos --------------------------------------------------------------------------
@@ -1981,7 +2035,7 @@ class ThumbSheet(Gtk.Window):
             return False
         if self.generator:
             self.generator.cancel()
-        S = snap_interval(self.interval_scale.get_value())
+        S = self.current_interval()
         holder = []
         current = lambda: self.generator is holder[0]  # noqa: E731
         gen = Generator(doc.info, doc.cache_dir, S, self.sheet.tile_ready,
@@ -1989,10 +2043,14 @@ class ThumbSheet(Gtk.Window):
                         lambda: self.on_done() if current() else False)
         holder.append(gen)
         self.generator = gen
+        center = self.sheet.center_time()   # None si es un vídeo recién abierto (plan vacío)
         self.sheet.set_plan(gen.timestamps)
         # se marcan las teselas que tocan algún segmento; los segmentos guardados no cambian con la rejilla
         self.sheet.set_selected(doc.selection.tiles(gen.timestamps, S, doc.info.duration))
-        self.scroller.get_vadjustment().set_value(0)
+        if center is not None:
+            self.sheet.scroll_to_time(center)   # cambio de intervalo: misma zona del vídeo a la vista
+        else:
+            self.scroller.get_vadjustment().set_value(0)
         gen.start()
         self._refresh_status()
         self._update_buttons()
@@ -2528,15 +2586,18 @@ class ThumbSheet(Gtk.Window):
         self.toast.show_error(("%s\n%s" % (text, secondary)) if secondary else text)
 
     # ---- controles --------------------------------------------------------------------------------
+    def current_interval(self):
+        i = int(round(self.interval_scale.get_value()))
+        return INTERVALS[max(0, min(len(INTERVALS) - 1, i))]
+
     def _update_labels(self):
-        self.interval_label.set_text("%d s" % snap_interval(self.interval_scale.get_value()))
-        self.tile_label.set_text("%d px" % int(round(self.tile_scale.get_value())))
+        self.interval_label.set_text(fmt_interval(self.current_interval()))
+        self.tile_label.set_text("%d por fila" % int(round(self.tile_scale.get_value())))
 
     def on_interval_changed(self, scale):
         v = scale.get_value()
-        snapped = snap_interval(v)
-        if abs(v - snapped) > 1e-6:
-            scale.set_value(snapped)   # re-entra ya ajustado (clic en la pista, arrastre fino...)
+        if abs(v - round(v)) > 1e-6:
+            scale.set_value(round(v))   # re-entra ya en una posición entera (clic en la pista, arrastre fino...)
             return
         self._update_labels()
         if self._regen_id:
@@ -2545,7 +2606,7 @@ class ThumbSheet(Gtk.Window):
 
     def on_tile_changed(self, scale):
         self._update_labels()
-        self.sheet.set_tile_w(int(round(scale.get_value())))
+        self.sheet.set_cols(int(round(scale.get_value())))
 
     def _wheel_steps(self, event, key):
         """Pasos de rueda (+1 arriba / -1 abajo); con scroll suave acumula hasta completar un paso."""
@@ -2573,7 +2634,7 @@ class ThumbSheet(Gtk.Window):
             return False
         n = self._wheel_steps(event, "sheet")
         if n:
-            self.tile_scale.set_value(self.tile_scale.get_value() + n * 16)
+            self.tile_scale.set_value(self.tile_scale.get_value() - n)
         return True
 
     def on_key(self, widget, event):
@@ -2615,10 +2676,10 @@ class ThumbSheet(Gtk.Window):
             self.add_paths(choose_videos(self))
             return True
         if ctrl and event.keyval in (Gdk.KEY_plus, Gdk.KEY_equal, Gdk.KEY_KP_Add):
-            self.tile_scale.set_value(self.tile_scale.get_value() + 16)
+            self.tile_scale.set_value(self.tile_scale.get_value() - 1)
             return True
         if ctrl and event.keyval in (Gdk.KEY_minus, Gdk.KEY_KP_Subtract):
-            self.tile_scale.set_value(self.tile_scale.get_value() - 16)
+            self.tile_scale.set_value(self.tile_scale.get_value() + 1)
             return True
         return False
 
@@ -2642,8 +2703,8 @@ class ThumbSheet(Gtk.Window):
             self.generator.cancel()
         w, h = self.get_size()
         save_settings({
-            "interval": snap_interval(self.interval_scale.get_value()),
-            "tile": int(round(self.tile_scale.get_value())),
+            "interval": self.current_interval(),
+            "cols": int(round(self.tile_scale.get_value())),
             "win_w": w, "win_h": h, "maximized": self._maximized,
             "panel_w": self.paned.get_position(),
         })

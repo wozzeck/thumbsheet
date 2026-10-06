@@ -1,8 +1,10 @@
 # thumbsheet
 
 Sábana de miniaturas de vídeo para Linux (GTK3). Abres uno o varios vídeos y aparece un mosaico con
-una captura cada N segundos. Controles: **Intervalo** (5–300 s), **Tamaño** de las teselas, y a la
-derecha del contador los botones **Cortar**, **LLC** y **Eliminar**.
+una captura cada N segundos. Controles: **Intervalo** (1 s, 2 s, 5, 10, 15, 30 s, 1, 2, 5 o 10 min),
+**Tamaño** (teselas por fila, de 3 a 20; el ancho se adapta a la ventana), y a la derecha del contador
+los botones **Cortar**, **LLC** y **Eliminar**. Al cambiar el tamaño o el intervalo, la tesela que estaba
+en el centro del visor sigue en el centro.
 
 ```
 thumbsheet vídeo.mp4 [otro.mkv ...]   # o "Abrir con" desde el gestor de archivos (admite varios)
@@ -51,12 +53,13 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   desaparece a los 3 s. Rojo si hubo un error: se queda hasta que lo cierres (`×` o `Esc`), con el texto
   seleccionable y un botón Copiar para pegar el mensaje donde haga falta.
 
-El intervalo va **de 5 en 5** (5, 10, 15 … 300). Así todas las capturas caen en segundos múltiplos
-de 5 y se conservan al cambiar el intervalo: pasar de 30 s a 60 s no genera nada, y de 30 s a 10 s
-sólo genera los dos tercios que faltan. Lo ya generado no se tira nunca (vive en la caché de disco).
+La caché va por segundo, así que las capturas coincidentes entre intervalos se reutilizan: pasar de
+30 s a 1 min no genera nada, y de 30 s a 10 s sólo genera los dos tercios que faltan. Lo ya generado no
+se tira nunca (vive en la caché de disco). Los intervalos de 1 y 2 s decodifican el vídeo entero por
+tramos (con GPU si la hay): en vídeos largos tardan.
 
-Atajos: la rueda sobre el slider de intervalo mueve ±5 s y sobre el de tamaño ±16 px; `Ctrl+rueda`
-sobre el mosaico o `Ctrl +/-` cambian el tamaño de tesela; `Esc` deselecciona; `Ctrl+Q` cierra.
+Atajos: la rueda sobre cada slider mueve un paso; `Ctrl+rueda` sobre el mosaico o `Ctrl +/-` cambian
+las teselas por fila; `Esc` deselecciona; `Ctrl+Q` cierra.
 
 ## Instalación (Ubuntu / Mint / Debian)
 

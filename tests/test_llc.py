@@ -52,8 +52,9 @@ with tempfile.TemporaryDirectory() as d:
     except ImportError:
         print("skip PyYAML no instalado")
 
-for v, exp in ((5, 5), (7, 5), (8, 10), (12.6, 15), (300, 300), (301, 300), (0, 5)):
+for v, exp in ((1, 1), (3, 2), (4, 5), (7, 5), (8, 10), (12.6, 15), (44, 30), (46, 60), (90, 60), (91, 120), (300, 300), (700, 600), ("x", 30)):
     check(T.snap_interval(v) == exp, "snap_interval(%s) = %s" % (v, exp))
+check(T.fmt_interval(30) == "30 s" and T.fmt_interval(120) == "2 min" and T.interval_mark(600) == "10m", "formato de intervalos")
 
 print("RESULTADO:", "OK" if fails == 0 else "FALLO (%d)" % fails)
 sys.exit(1 if fails else 0)

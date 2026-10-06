@@ -43,6 +43,11 @@ sel() { cat "$SEL"/*/selection.json 2>/dev/null | head -1 || true; }
 seg() { python3 -c 'import json,sys; a=[int(x) for x in sys.argv[1:]]; print(json.dumps({"segments": [[a[i], a[i+1]] for i in range(0, len(a), 2)]}))' "$@"; }
 chk() { [[ "$2" == "$3" ]] && ok "$1" || ko "$1 → $2 (esperado $3)"; }
 
+# 0. al terminar el vídeo actual, el otro se genera en segundo plano al mismo intervalo
+for i in $(seq 1 20); do grep -q "fin: .*\[$(basename "$VIDEO_B")\]" "$OUT/app.log" && break; sleep 0.5; done
+grep -q "segundo plano: $(basename "$VIDEO_B")" "$OUT/app.log" && grep -q "fin: .*\[$(basename "$VIDEO_B")\]" "$OUT/app.log" && ok "el segundo vídeo se generó en segundo plano al terminar el primero" || ko "sin generación en segundo plano del segundo vídeo"
+NB=$(ls "$SEL"/*/ -d | wc -l); [[ "$NB" -ge 2 ]] && ok "hay caché para los dos vídeos ($NB directorios)" || ko "directorios de caché: $NB"
+
 # 1. rueda sobre el slider de intervalo: un paso = siguiente valor de la lista (30 s → 1 min)
 xdotool mousemove $((X+IX)) $((Y+IY)) click 4; sleep 1.5
 S0=$(S); chk "rueda sobre intervalo: 30 s → 1 min (siguiente valor de la lista)" "$S0" "60"
@@ -123,10 +128,14 @@ centro() { grep -o "cols: [0-9]* -> [0-9]*, centro t=[0-9]*" "$OUT/app.log" | ta
 ncols() { grep -o "cols: [0-9]* -> [0-9]*" "$OUT/app.log" | tail -1 | sed 's/.*-> //'; }
 ahora() { grep -o "centro real ahora t=[0-9]*" "$OUT/app.log" | tail -1 | sed 's/.*t=//'; }
 centrado_ok() { python3 -c "import sys; a=int(sys.argv[1]); b=int(sys.argv[2]); tol=int(sys.argv[3])*int(sys.argv[4]); sys.exit(0 if abs(a-b) <= tol else 1)" "$1" "$2" "$3" "$4"; }
-xdotool mousemove $((X+TX-TW*15/100)) $((Y+TY)) click 1; sleep 1.0; shot 8-mas-columnas 0.3
-centrado_ok "$(centro)" "$(ahora)" "$(ncols)" "$(S)" && ok "más columnas ($(ncols)): la tesela central ($(centro) s) sigue centrada (ahora $(ahora) s)" || ko "más columnas: centro antes $(centro) s, después $(ahora) s"
-xdotool mousemove $((X+TX-TW*35/100)) $((Y+TY)) click 1; sleep 1.0; shot 9-menos-columnas 0.3
-centrado_ok "$(centro)" "$(ahora)" "$(ncols)" "$(S)" && ok "menos columnas ($(ncols)): la tesela central ($(centro) s) sigue centrada (ahora $(ahora) s)" || ko "menos columnas: centro antes $(centro) s, después $(ahora) s"
+# columnas exactas con el teclado: clic en el slider (toma el foco) y flechas hasta el valor deseado
+to_cols() { local want=$1 n; xdotool mousemove $((X+TX)) $((Y+TY)) click 1; sleep 0.4
+  for i in $(seq 1 24); do n=$(ncols); [[ -z "$n" ]] && n=$COLS; [[ "$n" == "$want" ]] && break
+    if (( n < want )); then xdotool key Right; else xdotool key Left; fi; sleep 0.25; done; sleep 0.8; }
+to_cols 9; shot 8-mas-columnas 0.3
+[[ "$(ncols)" == 9 ]] && centrado_ok "$(centro)" "$(ahora)" "$(ncols)" "$(S)" && ok "más columnas (9): la tesela central ($(centro) s) sigue centrada (ahora $(ahora) s)" || ko "más columnas: cols=$(ncols) centro antes $(centro) s, después $(ahora) s"
+to_cols 5; shot 9-menos-columnas 0.3
+[[ "$(ncols)" == 5 ]] && centrado_ok "$(centro)" "$(ahora)" "$(ncols)" "$(S)" && ok "menos columnas (5): la tesela central ($(centro) s) sigue centrada (ahora $(ahora) s)" || ko "menos columnas: cols=$(ncols) centro antes $(centro) s, después $(ahora) s"
 
 # 10. Escape limpia la selección
 xdotool windowfocus --sync "$WID"; xdotool key Escape; sleep 0.6

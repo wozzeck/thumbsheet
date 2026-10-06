@@ -12,7 +12,12 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
 ```
 
 - **Varios vídeos**: se listan en el panel izquierdo (nombre, duración y resolución); clic para ver
-  cada sábana. Se añaden más con `Ctrl+O` o arrastrándolos a la ventana.
+  cada sábana. Se añaden más con `Ctrl+O` o arrastrándolos a la ventana. Cuando el vídeo a la vista
+  termina de generarse, los demás se van generando **en segundo plano** al mismo intervalo, de uno en
+  uno; el vídeo a la vista y los cambios de intervalo tienen siempre prioridad.
+- **Estado**: junto a los botones, arriba el mensaje (capturas, duración, resolución, segmentos) y
+  abajo una barra de progreso: generación del vídeo actual, generación en segundo plano (con el nombre
+  del fichero) o avance del corte.
 - **Selección**: clic = alternar una tesela; clic y arrastrar = aplicar a un rango contiguo;
   `Shift`+clic = seleccionar todo entre la última tesela pulsada y esta; doble clic sobre una
   seleccionada = deseleccionar todo su tramo contiguo. Las seleccionadas se recuadran en rojo. `Esc`

@@ -370,6 +370,19 @@ class Gpu(object):
 # ----------------------------------------------------------------------------------------------
 # generación de miniaturas
 # ----------------------------------------------------------------------------------------------
+def plan_timestamps(duration, interval):
+    """Instantes de captura: 0, S, 2S... sin pasarse del final (la última debe tener medio segundo de margen)."""
+    D = float(duration)
+    return [t for t in range(0, int(math.floor(D)) + 1, int(interval)) if t <= D - 0.5] or [0]
+
+
+def doc_complete(doc, interval):
+    """¿Están ya en caché todas las capturas de este vídeo para este intervalo?"""
+    if doc.info is None or doc.cache_dir is None:
+        return True
+    return all((doc.cache_dir / ("%d.jpg" % t)).exists() for t in plan_timestamps(doc.info.duration, interval))
+
+
 class Generator(object):
     """Genera las capturas de un intervalo dado. Avisa por GLib.idle_add: on_tile(t), on_progress(done, total),
     on_done(). Cancelable (mata los ffmpeg en marcha)."""
@@ -392,15 +405,14 @@ class Generator(object):
         self.threads = []
         self.started = time.time()
 
-        D = info.duration
-        self.timestamps = [t for t in range(0, int(math.floor(D)) + 1, self.S) if t <= D - 0.5] or [0]
+        self.timestamps = plan_timestamps(info.duration, self.S)
         self.total = len(self.timestamps)
         self.workers = default_workers()
         gop = info.gop if info.gop is not None else max(400.0 / info.fps, 20.0)
         # coste por captura: seek ≈ decodificar GOP/2 + arranque (~1 s de vídeo equivalente); tramos ≈ S
         self.mode = "seek" if (gop / 2.0 + 1.0) < self.S else "range"
-        log("plan: S=%d capturas=%d gop=%.1fs fps=%.2f modo=%s workers=%d" % (
-            self.S, self.total, gop, info.fps, self.mode, self.workers))
+        log("plan: S=%d capturas=%d gop=%.1fs fps=%.2f modo=%s workers=%d [%s]" % (
+            self.S, self.total, gop, info.fps, self.mode, self.workers, info.path.name))
 
     # --- API ---
     def start(self):
@@ -641,7 +653,7 @@ class Generator(object):
         if self.finished or self.cancelled.is_set():
             return False
         self.finished = True
-        log("fin: %d capturas en %.1fs (%s)" % (self.total, time.time() - self.started, self.mode))
+        log("fin: %d capturas en %.1fs (%s) [%s]" % (self.total, time.time() - self.started, self.mode, self.info.path.name))
         self.on_done()
         return False
 
@@ -1670,6 +1682,7 @@ class Document(object):
         self.cache_dir = None
         self.selection = Selection()
         self.scroll = 0.0
+        self.bg_tried = None                  # intervalo para el que ya se intentó generar en segundo plano
         self.row = None
         self.lock = threading.Lock()
 
@@ -1755,6 +1768,8 @@ class ThumbSheet(Gtk.Window):
         self.docs = []
         self.current = None
         self.generator = None
+        self.gen_doc = None                   # vídeo que está generando self.generator (actual o 2.º plano)
+        self._cut_pct = None
         self._regen_id = None
         self._status_base = ""
         self._progress = (0, 0)
@@ -1841,12 +1856,20 @@ class ThumbSheet(Gtk.Window):
         self.llc_btn.connect("clicked", self.on_llc)
         bar.pack_end(self.llc_btn, False, False, 0)
         bar.pack_end(self.cut_btn, False, False, 0)
+        # mensaje arriba, barra de progreso abajo (generación en curso o en segundo plano, o corte)
+        status_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self.status = Gtk.Label(label="")
         self.status.set_xalign(1.0)
         self.status.set_ellipsize(Pango.EllipsizeMode.START)
         self.status.set_width_chars(24)
         self.status.set_max_width_chars(46)   # los mensajes largos se recortan, no estrechan los sliders
-        bar.pack_end(self.status, False, False, 4)
+        status_box.pack_start(self.status, False, False, 0)
+        self.progress = Gtk.ProgressBar()
+        self.progress.set_show_text(True)
+        self.progress.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        self.progress.set_valign(Gtk.Align.CENTER)
+        status_box.pack_start(self.progress, False, False, 0)
+        bar.pack_end(status_box, False, False, 4)
 
         # --- panel de ficheros + mosaico (con la vista ampliada superpuesta) ---
         self.overlay = Gtk.Overlay()
@@ -1988,6 +2011,8 @@ class ThumbSheet(Gtk.Window):
             doc.row.sub_label.set_markup("<small>%s</small>" % GLib.markup_escape_text(doc.subtitle))
         if doc is self.current:
             self._load_current()
+        else:
+            self._start_next_background()
         return False
 
     def on_row_selected(self, listbox, row):
@@ -2013,6 +2038,8 @@ class ThumbSheet(Gtk.Window):
             self._progress = (0, 0)
             self._refresh_status()
             self._update_buttons()
+            if doc is None:
+                GLib.idle_add(self._start_next_background)   # sin vídeo a la vista: que siga el resto
             return
         self.sheet.set_video(doc.info.aspect, doc.cache_dir)
         log("vídeo: %s %dx%d %s %.2ffps dur=%s gop=%s miniatura=%dx%d" % (
@@ -2028,21 +2055,58 @@ class ThumbSheet(Gtk.Window):
             self.scroller.get_vadjustment().set_value(doc.scroll)
         return False
 
-    def regenerate(self):
-        self._regen_id = None
-        doc = self.current
-        if not doc or not doc.info:
-            return False
+    def _start_generator(self, doc, foreground):
+        """Lanza la generación de `doc` al intervalo actual. En primer plano alimenta el mosaico; en
+        segundo plano sólo rellena la caché (el mosaico muestra otro vídeo)."""
         if self.generator:
             self.generator.cancel()
         S = self.current_interval()
         holder = []
         current = lambda: self.generator is holder[0]  # noqa: E731
-        gen = Generator(doc.info, doc.cache_dir, S, self.sheet.tile_ready,
+        on_tile = self.sheet.tile_ready if foreground else (lambda t: False)
+        gen = Generator(doc.info, doc.cache_dir, S, on_tile,
                         lambda d, n: self.on_progress(d, n) if current() else False,
                         lambda: self.on_done() if current() else False)
         holder.append(gen)
         self.generator = gen
+        self.gen_doc = doc
+        self._progress = (0, gen.total)
+        return gen
+
+    def _start_next_background(self):
+        """Cuando no hay nada generándose, sigue con el siguiente vídeo del panel (en orden, dando la
+        vuelta) que aún no tenga todas las capturas de este intervalo. Uno cada vez."""
+        if self.generator is not None and not self.generator.finished:
+            return False
+        if not self.docs:
+            return False
+        S = self.current_interval()
+        start = self.gen_doc if self.gen_doc in self.docs else self.current
+        i0 = self.docs.index(start) + 1 if start in self.docs else 0
+        for k in range(len(self.docs)):
+            doc = self.docs[(i0 + k) % len(self.docs)]
+            if doc is self.current or doc.info is None or doc.bg_tried == S:
+                continue
+            doc.bg_tried = S
+            if doc_complete(doc, S):
+                continue
+            log("segundo plano: %s" % doc.path.name)
+            gen = self._start_generator(doc, foreground=False)
+            self._refresh_status()
+            gen.start()
+            return False
+        return False
+
+    def regenerate(self):
+        self._regen_id = None
+        doc = self.current
+        if not doc or not doc.info:
+            return False
+        S = self.current_interval()
+        for d in self.docs:
+            if d.bg_tried != S:
+                d.bg_tried = None   # intervalo nuevo: los demás vuelven a ser candidatos a segundo plano
+        gen = self._start_generator(doc, foreground=True)
         center = self.sheet.center_time()   # None si es un vídeo recién abierto (plan vacío)
         self.sheet.set_plan(gen.timestamps)
         # se marcan las teselas que tocan algún segmento; los segmentos guardados no cambian con la rejilla
@@ -2064,12 +2128,13 @@ class ThumbSheet(Gtk.Window):
 
     def on_done(self):
         self._refresh_status()
+        GLib.idle_add(self._start_next_background)
         return False
 
     # ---- estado y botones ----------------------------------------------------------------------
     def _segments(self):
         doc = self.current
-        if not doc or not doc.info or not self.generator:
+        if not doc or not doc.info:
             return []
         return list(doc.selection.segments)
 
@@ -2081,16 +2146,33 @@ class ThumbSheet(Gtk.Window):
             base = "No se pudo abrir: %s" % doc.error
         elif doc.info is None:
             base = "Analizando…"
-        elif self.generator and not self.generator.finished:
-            base = "%d / %d capturas" % self._progress
         else:
-            base = "%d capturas · %s · %dx%d" % (self.generator.total if self.generator else 0,
+            base = "%d capturas · %s · %dx%d" % (len(plan_timestamps(doc.info.duration, self.current_interval())),
                                                  fmt_time(doc.info.duration), doc.info.width, doc.info.height)
         n = len(self._segments())
         if n:
             base += " · %d segmento%s" % (n, "" if n == 1 else "s")
         self._status_base = base
         self.status.set_text(base)
+        # barra: corte > generación (actual o en segundo plano) > nada
+        if self._cut is not None:
+            if self._cut_pct is None:
+                self.progress.set_fraction(0.0)
+                self.progress.set_text("Analizando keyframes…" if not self._cut["exact"] else "Preparando…")
+            else:
+                self.progress.set_fraction(self._cut_pct / 100.0)
+                self.progress.set_text("Cortando… %d %%" % self._cut_pct)
+        elif self.generator is not None and not self.generator.finished and self.generator.total:
+            done, total = self._progress
+            frac = min(1.0, done / float(total))
+            self.progress.set_fraction(frac)
+            if self.gen_doc is self.current:
+                self.progress.set_text("%d / %d capturas" % (min(done, total), total))
+            else:
+                self.progress.set_text("2.º plano: %s · %d %%" % (self.gen_doc.path.name if self.gen_doc else "?", int(frac * 100)))
+        else:
+            self.progress.set_fraction(1.0 if self.docs else 0.0)
+            self.progress.set_text("")
 
     def _flash(self, text):
         """Aviso de operación correcta (toast verde, 3 s)."""
@@ -2106,14 +2188,15 @@ class ThumbSheet(Gtk.Window):
 
     # ---- selección (clic / arrastre sobre teselas → segmentos) ----------------------------------
     def _grid(self):
-        return self.generator.timestamps, self.generator.S, self.current.info.duration
+        S = self.current_interval()
+        return plan_timestamps(self.current.info.duration, S), S, self.current.info.duration
 
     def on_drag_begin(self):
         self._sel_snapshot = self.current.selection.copy() if self.current else None
 
     def on_drag_apply(self, timestamps, mode):
         doc = self.current
-        if doc is None or doc.info is None or not self.generator or self._sel_snapshot is None:
+        if doc is None or doc.info is None or self._sel_snapshot is None:
             return
         ts_all, S, dur = self._grid()
         sel = self._sel_snapshot.copy()
@@ -2165,22 +2248,22 @@ class ThumbSheet(Gtk.Window):
         if full.exists():
             self._preview_loaded(doc, t, full)
         # vecinos primero (quedan debajo en la pila) y el actual el último: LIFO lo atiende antes
-        ts = self.generator.timestamps if self.generator else []
+        ts = self.sheet.ts
         neighbours = [ts[i] for i in (self._tile_index(t) - 1, self._tile_index(t) + 1) if 0 <= i < len(ts)]
         self._request_full(doc, neighbours + ([] if full.exists() else [t]))
 
     def _tile_index(self, t):
-        ts = self.generator.timestamps if self.generator else []
+        ts = self.sheet.ts
         if not ts:
             return -1
         return min(range(len(ts)), key=lambda k: abs(ts[k] - t))
 
     def _preview_step(self, delta):
         """Flechas izquierda/derecha en la vista ampliada: fotograma anterior/siguiente."""
-        if self._preview_key is None or not self.generator:
+        if self._preview_key is None or not self.sheet.ts:
             return
         doc, t = self._preview_key
-        ts = self.generator.timestamps
+        ts = self.sheet.ts
         i = max(0, min(len(ts) - 1, self._tile_index(t) + delta))
         if ts and ts[i] != t:
             self.show_preview(ts[i])
@@ -2425,8 +2508,9 @@ class ThumbSheet(Gtk.Window):
         self.settings["cut_mode"] = "exact" if use_exact else "copy"
         self._cut = {"doc": doc, "segments": list(segs), "out": out, "exact": use_exact, "proc": None,
                      "cancel": threading.Event(), "expected": total}
+        self._cut_pct = None
         self._update_buttons()
-        self.status.set_text("Analizando keyframes…" if not use_exact else "Preparando…")
+        self._refresh_status()
         threading.Thread(target=self._cut_worker, args=(self._cut,), name="ts-cut", daemon=True).start()
 
     def _cut_worker(self, job):
@@ -2489,8 +2573,8 @@ class ThumbSheet(Gtk.Window):
 
     def _cut_progress(self, job, done):
         if self._cut is job and job["expected"] > 0:
-            pct = max(0, min(100, int(100 * done / job["expected"])))
-            self.status.set_text("Cortando… %d %%" % pct)
+            self._cut_pct = max(0, min(100, int(100 * done / job["expected"])))
+            self._refresh_status()
         return False
 
     def _cut_cancel(self):
@@ -2503,12 +2587,13 @@ class ThumbSheet(Gtk.Window):
                 job["proc"].terminate()
             except OSError:
                 pass
-        self.status.set_text("Cancelando…")
+        self.progress.set_text("Cancelando…")
 
     def _cut_done(self, job, duration, error):
         if self._cut is not job:
             return False
         self._cut = None
+        self._cut_pct = None
         self._update_buttons()
         self._refresh_status()
         out = job["out"]
@@ -2654,7 +2739,7 @@ class ThumbSheet(Gtk.Window):
             if event.keyval in (Gdk.KEY_Left, Gdk.KEY_Right, Gdk.KEY_Home, Gdk.KEY_End):
                 if self._player_doc is not None:
                     # con vídeo cargado: saltar un intervalo (o al principio / final)
-                    S = self.generator.S if self.generator else INTERVAL_DEF
+                    S = self.current_interval()
                     dur = self.layer.duration
                     pos = self.player.position()
                     if pos is None:

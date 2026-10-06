@@ -148,7 +148,8 @@ xdotool mousemove $((X+700)) $((Y+500)); for i in $(seq 1 80); do xdotool click 
 xdotool mousemove $(tile 0 1) click 1; sleep 0.5
 chk "una tesela seleccionada para el corte (S=$(S))" "$(sel)" "$(seg 5 10)"
 dlg() { xdotool search --name "Cortar y unir" 2>/dev/null | head -1 || true; }
-NV=$(grep -c "vídeo: $(basename "$CUT")" "$OUT/app.log" || true)
+shown() { grep "\] vídeo: " "$OUT/app.log" | tail -1 | sed 's/.*vídeo: //; s/ [0-9]*x[0-9]* .*//'; }   # vídeo a la vista
+NV=$(grep -c "vídeo: $(basename "$VIDEO_B")" "$OUT/app.log" || true)
 xdotool mousemove $((X+CX)) $((Y+CY)) click 1; sleep 1; xdotool key alt+b; shot 10b-armado 1
 [[ -n "$(dlg)" && -f "$COPY" ]] && ok "cortar y borrar: la primera pulsación sólo arma el botón (diálogo abierto, original intacto)" || ko "primera pulsación: diálogo='$(dlg)' original=$([[ -f "$COPY" ]] && echo sigue || echo BORRADO)"
 sleep 5.5; xdotool key alt+b; sleep 1
@@ -158,12 +159,19 @@ for i in $(seq 1 60); do grep -q "cut: original borrado\|cut: error" "$OUT/app.l
 [[ ! -f "$COPY" && -f "$CUT" ]] && ok "segunda pulsación: corta y borra el original" || ko "cortar y borrar: original=$([[ -f "$COPY" ]] && echo sigue || echo borrado) corte=$([[ -f "$CUT" ]] && echo sí || echo no) · $(grep 'cut:' "$OUT/app.log" | tail -1)"
 grep -q "toast ok: Cortado.*original borrado" "$OUT/app.log" && ok "toast verde: cortado y original borrado" || ko "sin toast de cortado+borrado: $(grep 'toast' "$OUT/app.log" | tail -1)"
 sleep 2; shot 10b-tras-cortar-borrar 0.5
-[[ "$(grep -c "vídeo: $(basename "$CUT")" "$OUT/app.log" || true)" -gt "$NV" ]] && ok "el resultado (resondeado) queda seleccionado en el panel" || ko "el resultado no pasó a mostrarse"
+[[ "$(grep -c "vídeo: $(basename "$VIDEO_B")" "$OUT/app.log" || true)" -gt "$NV" && "$(shown)" == "$(basename "$VIDEO_B")" ]] && ok "el original sale del panel y se abre el siguiente de la lista ($(basename "$VIDEO_B"))" || ko "tras cortar y borrar se muestra '$(shown)'"
+for i in $(seq 1 20); do grep -q "segundo plano: $(basename "$CUT")\|vídeo: $(basename "$CUT")" "$OUT/app.log" && break; sleep 0.5; done
+grep -q "segundo plano: $(basename "$CUT")\|vídeo: $(basename "$CUT")" "$OUT/app.log" && ok "el cortado (resondeado) está en el panel" || ko "el cortado no aparece en el panel"
 
-# 11. Eliminar con confirmación (Alt+E en el diálogo): borra el vídeo a la vista, ahora el cortado
-xdotool mousemove $((X+DX)) $((Y+DY)) click 1; shot 10-dialogo-eliminar 1
-xdotool key alt+e; sleep 1.2
-[[ ! -f "$CUT" ]] && ok "archivo eliminado del disco" || ko "el archivo sigue existiendo"
+# 11. Eliminar con confirmación (Alt+E en el diálogo) sobre el cortado (2.ª fila). Nunca sobre el vídeo B,
+#     que es un fichero real: sólo se pulsa Eliminar si el que está a la vista es el cortado.
+xdotool mousemove $((X+${ROW2%,*})) $((Y+${ROW2#*,})) click 1; sleep 1.5
+if [[ "$(shown)" == "$(basename "$CUT")" ]]; then
+  xdotool mousemove $((X+DX)) $((Y+DY)) click 1; shot 10-dialogo-eliminar 1
+  xdotool key alt+e; sleep 1.2
+  [[ ! -f "$CUT" ]] && ok "archivo eliminado del disco" || ko "el archivo sigue existiendo"
+else ko "Eliminar omitido: a la vista está '$(shown)', no el cortado"; fi
+[[ -f "$VIDEO_B" ]] || { echo "¡¡el vídeo B ha desaparecido!!"; fail=1; }
 grep -q "toast ok: Eliminado" "$OUT/app.log" && ok "toast verde al eliminar" || ko "sin toast ok al eliminar"
 shot 11-tras-eliminar 1
 

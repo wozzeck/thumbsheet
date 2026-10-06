@@ -2493,10 +2493,10 @@ class ThumbSheet(Gtk.Window):
         total = sum(b - a for a, b in segs)
         dlg = Gtk.Dialog(title="Cortar y unir", transient_for=self, modal=True)
         dlg.add_button("_Cancelar", Gtk.ResponseType.CANCEL)
+        dlg.add_button("Cor_tar", Gtk.ResponseType.ACCEPT)
         del_btn = dlg.add_button(CUT_DEL_LABEL, RESP_CUT_DELETE)
         del_btn.set_tooltip_text("Corta y, si el resultado es correcto, borra el vídeo original del disco (sin papelera).\n"
                                  "Hay que pulsarlo dos veces seguidas para evitar borrados accidentales.")
-        dlg.add_button("Cor_tar", Gtk.ResponseType.ACCEPT)
         dlg.set_default_response(Gtk.ResponseType.ACCEPT)
         armed = [0]   # id del temporizador que desarma "cortar y borrar" (0 = sin armar)
 
@@ -2658,12 +2658,12 @@ class ThumbSheet(Gtk.Window):
             txt = "Cortado: %s · %d segmento%s · %s%s" % (out.name, len(job["final"]), "" if len(job["final"]) == 1 else "s",
                                                           fmt_time(duration if duration is not None else job["expected"]), extra)
             log("cut: hecho %s dur=%s esperado=%.2f" % (out.name, duration, job["expected"]))
-            new_doc = self._add_output(out)
+            self._add_output(out)
             if duration is not None and abs(duration - job["expected"]) > max(2.0, 0.03 * job["expected"]):
                 self._error(txt, "La duración del resultado (%s) no coincide con la esperada (%s): revisa el fichero.%s" % (
                     fmt_time(duration), fmt_time(job["expected"]), " El original se conserva." if job["delete"] else ""))
             elif job["delete"]:
-                err = self._delete_file(job["doc"], select=new_doc)
+                err = self._delete_file(job["doc"])
                 if err:
                     self._error("%s · no se pudo borrar el original" % txt, err)
                 else:
@@ -2681,9 +2681,8 @@ class ThumbSheet(Gtk.Window):
             if self.generator is not None and self.gen_doc is old:
                 self.generator.cancel()
                 self.generator = None
-            self._remove_doc(old, select=False)
+            self._remove_doc(old, show_next=False)
         self.add_paths([str(out)])
-        return next((d for d in self.docs if d.path == out), None)
 
     # ---- eliminar -------------------------------------------------------------------------------
     def on_delete(self, *_):
@@ -2711,9 +2710,9 @@ class ThumbSheet(Gtk.Window):
             return
         self._flash("Eliminado: %s" % doc.path.name)
 
-    def _delete_file(self, doc, select=None):
+    def _delete_file(self, doc):
         """Borra el vídeo de `doc` del disco (directamente, sin papelera) junto con su caché y lo quita del
-        panel. Devuelve el texto del error o None. `select`: documento a mostrar si `doc` era el actual."""
+        panel; si era el que estaba a la vista se abre el siguiente de la lista. Devuelve el error o None."""
         if doc is self.current:
             self.hide_preview()
         if self.generator is not None and self.gen_doc is doc:
@@ -2725,14 +2724,14 @@ class ThumbSheet(Gtk.Window):
             return "%s\n%s" % (doc.path, e)
         if doc.cache_dir:
             shutil.rmtree(str(doc.cache_dir), ignore_errors=True)
-        self._remove_doc(doc, select=select)
+        self._remove_doc(doc)
         if self.generator is None:
             GLib.idle_add(self._start_next_background)
         return None
 
-    def _remove_doc(self, doc, select=None):
-        """Quita `doc` del panel. Si era el actual pasa a mostrar `select` (o, en su defecto, el vecino);
-        con `select=False` no muestra nada."""
+    def _remove_doc(self, doc, show_next=True):
+        """Quita `doc` del panel. Si era el que estaba a la vista, abre el siguiente de la lista (o el último si
+        era el último); con `show_next=False` deja el mosaico vacío."""
         if doc not in self.docs:
             return
         idx = self.docs.index(doc)
@@ -2745,12 +2744,10 @@ class ThumbSheet(Gtk.Window):
             self.listbox.remove(row)
         if not was_current:
             return
-        if select is False or not self.docs:
+        if show_next and self.docs:
+            self.listbox.select_row(self.docs[min(idx, len(self.docs) - 1)].row)
+        else:
             self._load_current()
-            return
-        if select is None or select not in self.docs:
-            select = self.docs[min(idx, len(self.docs) - 1)]
-        self.listbox.select_row(select.row)
 
     def _error(self, text, secondary=""):
         """Aviso de error (toast rojo permanente, texto copiable)."""

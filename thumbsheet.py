@@ -57,6 +57,9 @@ CONFIG_FILE = pathlib.Path(os.environ.get("XDG_CONFIG_HOME", HOME / ".config")) 
 THUMB_MAX = int(os.environ.get("THUMBSHEET_THUMB_PX", "480"))     # lado mayor de la miniatura guardada
 INTERVALS = [1, 2, 5, 10, 20, 30, 60, 120, 300, 600]     # valores del slider de intervalo (s)
 INTERVAL_DEF = 30
+RESP_CUT_DELETE = 1                      # respuesta del diálogo de corte: cortar y borrar el original
+CUT_DEL_LABEL = "Cortar y _borrar original"
+CUT_DEL_ARM_MS = 5000                    # tras la primera pulsación, el botón se desarma si no se confirma a tiempo
 COLS_MIN, COLS_MAX, COLS_DEF = 3, 20, 6                     # teselas por fila
 PIX_BUDGET = int(os.environ.get("THUMBSHEET_PIX_MB", "64")) * 1024 * 1024
 DEBUG = os.environ.get("THUMBSHEET_DEBUG") == "1"
@@ -2490,8 +2493,31 @@ class ThumbSheet(Gtk.Window):
         total = sum(b - a for a, b in segs)
         dlg = Gtk.Dialog(title="Cortar y unir", transient_for=self, modal=True)
         dlg.add_button("_Cancelar", Gtk.ResponseType.CANCEL)
+        del_btn = dlg.add_button(CUT_DEL_LABEL, RESP_CUT_DELETE)
+        del_btn.set_tooltip_text("Corta y, si el resultado es correcto, borra el vídeo original del disco (sin papelera).\n"
+                                 "Hay que pulsarlo dos veces seguidas para evitar borrados accidentales.")
         dlg.add_button("Cor_tar", Gtk.ResponseType.ACCEPT)
         dlg.set_default_response(Gtk.ResponseType.ACCEPT)
+        armed = [0]   # id del temporizador que desarma "cortar y borrar" (0 = sin armar)
+
+        def disarm():
+            armed[0] = 0
+            del_btn.set_label(CUT_DEL_LABEL)
+            del_btn.get_style_context().remove_class("destructive-action")
+            return False
+
+        def on_response(d, rid):
+            if rid != RESP_CUT_DELETE:
+                return
+            if armed[0]:                                  # segunda pulsación: la respuesta sigue su curso
+                GLib.source_remove(armed[0])
+                armed[0] = 0
+                return
+            armed[0] = GLib.timeout_add(CUT_DEL_ARM_MS, disarm)   # primera pulsación: sólo arma el botón
+            del_btn.set_label("Confirmar: cortar y _borrar")
+            del_btn.get_style_context().add_class("destructive-action")
+            d.stop_emission_by_name("response")
+        dlg.connect("response", on_response)
         box = dlg.get_content_area()
         box.set_spacing(8)
         for w in (box,):
@@ -2521,12 +2547,14 @@ class ThumbSheet(Gtk.Window):
         box.show_all()
         resp = dlg.run()
         use_exact = exact.get_active()
+        if armed[0]:
+            GLib.source_remove(armed[0])
         dlg.destroy()
-        if resp != Gtk.ResponseType.ACCEPT:
+        if resp not in (Gtk.ResponseType.ACCEPT, RESP_CUT_DELETE):
             return
         self.settings["cut_mode"] = "exact" if use_exact else "copy"
         self._cut = {"doc": doc, "segments": list(segs), "out": out, "exact": use_exact, "proc": None,
-                     "cancel": threading.Event(), "expected": total}
+                     "cancel": threading.Event(), "expected": total, "delete": resp == RESP_CUT_DELETE}
         self._cut_pct = None
         self._update_buttons()
         self._refresh_status()
@@ -2629,14 +2657,33 @@ class ThumbSheet(Gtk.Window):
             extra = " (+%.1f s por keyframes)" % added if added > 0.05 else ""
             txt = "Cortado: %s · %d segmento%s · %s%s" % (out.name, len(job["final"]), "" if len(job["final"]) == 1 else "s",
                                                           fmt_time(duration if duration is not None else job["expected"]), extra)
+            log("cut: hecho %s dur=%s esperado=%.2f" % (out.name, duration, job["expected"]))
+            new_doc = self._add_output(out)
             if duration is not None and abs(duration - job["expected"]) > max(2.0, 0.03 * job["expected"]):
-                self._error(txt, "La duración del resultado (%s) no coincide con la esperada (%s): revisa el fichero." % (
-                    fmt_time(duration), fmt_time(job["expected"])))
+                self._error(txt, "La duración del resultado (%s) no coincide con la esperada (%s): revisa el fichero.%s" % (
+                    fmt_time(duration), fmt_time(job["expected"]), " El original se conserva." if job["delete"] else ""))
+            elif job["delete"]:
+                err = self._delete_file(job["doc"], select=new_doc)
+                if err:
+                    self._error("%s · no se pudo borrar el original" % txt, err)
+                else:
+                    log("cut: original borrado %s" % job["doc"].path.name)
+                    self._flash("%s · original borrado" % txt)
             else:
                 self._flash(txt)
-            log("cut: hecho %s dur=%s esperado=%.2f" % (out.name, duration, job["expected"]))
-            self.add_paths([str(out)])
         return False
+
+    def _add_output(self, out):
+        """Añade el fichero cortado al panel. Si ya estaba cargado (se ha sobrescrito), lo quita y lo vuelve a
+        añadir para que se sondee de nuevo: tamaño y fecha nuevos, otra caché."""
+        old = next((d for d in self.docs if d.path == out), None)
+        if old is not None:
+            if self.generator is not None and self.gen_doc is old:
+                self.generator.cancel()
+                self.generator = None
+            self._remove_doc(old, select=False)
+        self.add_paths([str(out)])
+        return next((d for d in self.docs if d.path == out), None)
 
     # ---- eliminar -------------------------------------------------------------------------------
     def on_delete(self, *_):
@@ -2658,34 +2705,52 @@ class ThumbSheet(Gtk.Window):
         dlg.destroy()
         if resp != Gtk.ResponseType.ACCEPT:
             return
-        self.hide_preview()
-        if self.generator:
+        err = self._delete_file(doc)
+        if err:
+            self._error("No se pudo eliminar el archivo", err)
+            return
+        self._flash("Eliminado: %s" % doc.path.name)
+
+    def _delete_file(self, doc, select=None):
+        """Borra el vídeo de `doc` del disco (directamente, sin papelera) junto con su caché y lo quita del
+        panel. Devuelve el texto del error o None. `select`: documento a mostrar si `doc` era el actual."""
+        if doc is self.current:
+            self.hide_preview()
+        if self.generator is not None and self.gen_doc is doc:
             self.generator.cancel()
             self.generator = None
         try:
             os.remove(str(doc.path))
         except OSError as e:
-            self._error("No se pudo eliminar el archivo", "%s\n%s" % (doc.path, e))
-            return
+            return "%s\n%s" % (doc.path, e)
         if doc.cache_dir:
             shutil.rmtree(str(doc.cache_dir), ignore_errors=True)
-        self._remove_doc(doc)
-        self._flash("Eliminado: %s" % doc.path.name)
+        self._remove_doc(doc, select=select)
+        if self.generator is None:
+            GLib.idle_add(self._start_next_background)
+        return None
 
-    def _remove_doc(self, doc):
+    def _remove_doc(self, doc, select=None):
+        """Quita `doc` del panel. Si era el actual pasa a mostrar `select` (o, en su defecto, el vecino);
+        con `select=False` no muestra nada."""
+        if doc not in self.docs:
+            return
         idx = self.docs.index(doc)
         self.docs.remove(doc)
-        row = doc.row
-        doc.row = None
-        if self.current is doc:
+        row, doc.row = doc.row, None
+        was_current = self.current is doc
+        if was_current:
             self.current = None
         if row is not None:
             self.listbox.remove(row)
-        if self.docs:
-            nxt = self.docs[min(idx, len(self.docs) - 1)]
-            self.listbox.select_row(nxt.row)
-        else:
+        if not was_current:
+            return
+        if select is False or not self.docs:
             self._load_current()
+            return
+        if select is None or select not in self.docs:
+            select = self.docs[min(idx, len(self.docs) - 1)]
+        self.listbox.select_row(select.row)
 
     def _error(self, text, secondary=""):
         """Aviso de error (toast rojo permanente, texto copiable)."""

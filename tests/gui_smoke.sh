@@ -3,7 +3,8 @@
 # xdotool recorre: rueda sobre el slider de intervalo, clic/arrastre/Shift+clic/doble clic de teselas, LLC
 # (y un error forzado → toast rojo), Cortar sin pérdida, cambio de intervalo sin alterar segmentos, vista
 # ampliada (flechas, reproducción muda, seek), cambio de vídeo, centrado al cambiar columnas, Escape,
-# Eliminar con confirmación, Ctrl+Q, y SIGKILL en plena generación sin huérfanos. Capturas PNG en `out`.
+# Cortar y borrar original (doble pulsación, desarme a los 5 s), Eliminar con confirmación, Ctrl+Q, y SIGKILL
+# en plena generación sin huérfanos. Capturas PNG en `out`.
 # Las expectativas se calculan a partir del intervalo (S) y las columnas (COLS) reales. El vídeo A debe
 # tener keyframes cada 6 s (grabación de Teams) para la comprobación del corte.
 # Uso: tests/gui_smoke.sh <vídeo A (se COPIA y la copia se borra)> <vídeo B (sólo lectura)> [dir_salida]
@@ -141,10 +142,28 @@ to_cols 5; shot 9-menos-columnas 0.3
 xdotool windowfocus --sync "$WID"; xdotool key Escape; sleep 0.6
 ls "$SEL"/*/selection.json >/dev/null 2>&1 && ko "Escape no limpió la selección" || ok "Escape limpia la selección"
 
-# 11. Eliminar con confirmación (Alt+E en el diálogo)
+# 10b. Cortar y borrar original: la primera pulsación sólo arma el botón (se desarma solo a los 5 s); la
+#      segunda corta, borra el original y deja el resultado seleccionado en el panel
+xdotool mousemove $((X+700)) $((Y+500)); for i in $(seq 1 80); do xdotool click 4; done; sleep 0.8   # arriba del todo (~1 fila por paso)
+xdotool mousemove $(tile 0 1) click 1; sleep 0.5
+chk "una tesela seleccionada para el corte (S=$(S))" "$(sel)" "$(seg 5 10)"
+dlg() { xdotool search --name "Cortar y unir" 2>/dev/null | head -1 || true; }
+NV=$(grep -c "vídeo: $(basename "$CUT")" "$OUT/app.log" || true)
+xdotool mousemove $((X+CX)) $((Y+CY)) click 1; sleep 1; xdotool key alt+b; shot 10b-armado 1
+[[ -n "$(dlg)" && -f "$COPY" ]] && ok "cortar y borrar: la primera pulsación sólo arma el botón (diálogo abierto, original intacto)" || ko "primera pulsación: diálogo='$(dlg)' original=$([[ -f "$COPY" ]] && echo sigue || echo BORRADO)"
+sleep 5.5; xdotool key alt+b; sleep 1
+[[ -n "$(dlg)" && -f "$COPY" ]] && ok "pasados 5 s se desarma: la pulsación tardía tampoco confirma" || ko "la pulsación tardía confirmó: diálogo='$(dlg)' original=$([[ -f "$COPY" ]] && echo sigue || echo BORRADO)"
+xdotool key alt+b
+for i in $(seq 1 60); do grep -q "cut: original borrado\|cut: error" "$OUT/app.log" && break; sleep 0.5; done
+[[ ! -f "$COPY" && -f "$CUT" ]] && ok "segunda pulsación: corta y borra el original" || ko "cortar y borrar: original=$([[ -f "$COPY" ]] && echo sigue || echo borrado) corte=$([[ -f "$CUT" ]] && echo sí || echo no) · $(grep 'cut:' "$OUT/app.log" | tail -1)"
+grep -q "toast ok: Cortado.*original borrado" "$OUT/app.log" && ok "toast verde: cortado y original borrado" || ko "sin toast de cortado+borrado: $(grep 'toast' "$OUT/app.log" | tail -1)"
+sleep 2; shot 10b-tras-cortar-borrar 0.5
+[[ "$(grep -c "vídeo: $(basename "$CUT")" "$OUT/app.log" || true)" -gt "$NV" ]] && ok "el resultado (resondeado) queda seleccionado en el panel" || ko "el resultado no pasó a mostrarse"
+
+# 11. Eliminar con confirmación (Alt+E en el diálogo): borra el vídeo a la vista, ahora el cortado
 xdotool mousemove $((X+DX)) $((Y+DY)) click 1; shot 10-dialogo-eliminar 1
 xdotool key alt+e; sleep 1.2
-[[ ! -f "$COPY" ]] && ok "archivo eliminado del disco" || ko "el archivo sigue existiendo"
+[[ ! -f "$CUT" ]] && ok "archivo eliminado del disco" || ko "el archivo sigue existiendo"
 grep -q "toast ok: Eliminado" "$OUT/app.log" && ok "toast verde al eliminar" || ko "sin toast ok al eliminar"
 shot 11-tras-eliminar 1
 

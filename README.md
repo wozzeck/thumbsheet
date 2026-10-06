@@ -52,7 +52,10 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
     disco en copiar.
   - *Exacto al fotograma*: recodifica (H.264 CRF 20 + AAC). Preciso, pero recomprime y es lento.
   El progreso se ve en el contador, el botón pasa a "Cancelar" mientras dura, y el resultado se añade
-  al panel.
+  al panel (si ya estaba cargado, se vuelve a sondear). El diálogo tiene un tercer botón, **Cortar y
+  borrar original**, que hace las dos cosas de una vez: hay que pulsarlo dos veces seguidas (la primera
+  sólo lo arma, en rojo, y se desarma solo a los 5 s), y el original se borra únicamente si el corte
+  termina bien y la duración del resultado cuadra. El resultado queda seleccionado en el panel.
 - **Eliminar**: borra el archivo de vídeo del disco directamente, sin papelera, tras confirmar.
 - **Avisos**: Cortar, LLC y Eliminar informan con un *toast* sobre el mosaico. Verde si ha ido bien,
   desaparece a los 3 s. Rojo si hubo un error: se queda hasta que lo cierres (`×` o `Esc`), con el texto

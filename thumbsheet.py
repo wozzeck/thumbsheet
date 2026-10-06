@@ -147,11 +147,14 @@ _APP_PID = os.getpid()
 
 
 def _pdeathsig_preexec():
-    """Se ejecuta en el hijo justo antes del exec: pide al kernel que le mande SIGTERM si el padre
+    """Se ejecuta en el hijo justo antes del exec: pide al kernel que lo mate (SIGKILL) si el padre
     (esta app) muere, sea como sea. El exec de nice/ionice/ffmpeg lo conserva. Si el padre ya murió
-    entre el fork y este prctl (carrera clásica de PDEATHSIG), el hijo se va directamente."""
+    entre el fork y este prctl (carrera clásica de PDEATHSIG), el hijo se va directamente.
+    SIGKILL y no SIGTERM: ffmpeg a veces se queda colgado en un futex al intentar salir limpio tras
+    SIGTERM (visto con la señal llegando durante el arranque), y todo lo que escribe son temporales
+    que sólo se renombran al terminar bien, así que matarlo en seco no deja nada a medias."""
     try:
-        _LIBC.prctl(1, signal.SIGTERM, 0, 0, 0)   # PR_SET_PDEATHSIG = 1
+        _LIBC.prctl(1, signal.SIGKILL, 0, 0, 0)   # PR_SET_PDEATHSIG = 1
         if os.getppid() != _APP_PID:
             os._exit(0)
     except Exception:  # noqa: BLE001
@@ -459,6 +462,16 @@ class Generator(object):
                 p.terminate()
             except OSError:
                 pass
+        if procs:
+            # si alguno no se va con SIGTERM (cuelgue raro de ffmpeg al salir), SIGKILL a los 2 s
+            def reap():
+                for q in procs:
+                    if q.poll() is None:
+                        try:
+                            q.kill()
+                        except OSError:
+                            pass
+            threading.Timer(2.0, reap).start()
 
     # --- planificación de tramos ---
     def _make_chunks(self, missing):
@@ -1569,6 +1582,7 @@ def write_llc_project(video_path, segments):
 # cortar y unir los segmentos seleccionados (ffmpeg, demuxer concat con inpoint/outpoint)
 # ----------------------------------------------------------------------------------------------
 COPY_CONTAINERS = (".mp4", ".mkv", ".mov", ".m4v", ".webm")
+CONTAINER_FORMAT = {".mp4": "mp4", ".m4v": "mp4", ".mov": "mov", ".mkv": "matroska", ".webm": "webm"}
 
 
 def cut_output_path(video_path):
@@ -1644,14 +1658,19 @@ def write_concat_list(list_path, video_path, segments):
     pathlib.Path(list_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def cut_command_copy(list_path, out_path):
+def _out_format(out_path):
+    """El resultado se escribe en <salida>.part y se renombra al acabar, así que el formato va explícito."""
+    return ["-f", CONTAINER_FORMAT.get(pathlib.Path(out_path).suffix.lower(), "matroska")]
+
+
+def cut_command_copy(list_path, out_path, tmp_path):
     """Sin pérdida: demuxer concat con inpoint/outpoint (en keyframes) y copia de streams."""
     return FFMPEG + ["-progress", "pipe:1", "-nostats", "-f", "concat", "-safe", "0", "-i", str(list_path),
-                     "-map", "0:v:0", "-map", "0:a?", "-ignore_unknown", "-c", "copy", "-avoid_negative_ts", "make_zero",
-                     "-y", str(out_path)]
+                     "-map", "0:v:0", "-map", "0:a?", "-ignore_unknown", "-c", "copy", "-avoid_negative_ts", "make_zero"] + \
+        _out_format(out_path) + ["-y", str(tmp_path)]
 
 
-def cut_command_exact(video_path, segments, out_path, has_audio):
+def cut_command_exact(video_path, segments, out_path, tmp_path, has_audio):
     """Exacto al fotograma: una entrada por segmento con seek exacto (-ss/-t antes de -i: sólo se decodifica
     cada tramo desde su keyframe) y filtro concat; recodifica. El demuxer concat NO sirve aquí: al
     recodificar no descarta los fotogramas entre el keyframe y el inpoint."""
@@ -1668,7 +1687,7 @@ def cut_command_exact(video_path, segments, out_path, has_audio):
     cmd += ["-filter_complex", fc] + maps + ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
     if has_audio:
         cmd += ["-c:a", "aac", "-b:a", "160k"]
-    return cmd + ["-y", str(out_path)]
+    return cmd + _out_format(out_path) + ["-y", str(tmp_path)]
 
 
 # ----------------------------------------------------------------------------------------------
@@ -2525,11 +2544,12 @@ class ThumbSheet(Gtk.Window):
             job["final"] = final
             job["expected"] = sum(b - a for a, b in final)
             list_path = doc.cache_dir / ".cut-list.txt"
+            tmp_out = out.with_name(out.name + ".part")
             if job["exact"]:
-                cmd = cut_command_exact(doc.path, final, out, doc.info.has_audio)
+                cmd = cut_command_exact(doc.path, final, out, tmp_out, doc.info.has_audio)
             else:
                 write_concat_list(list_path, doc.path, final)
-                cmd = cut_command_copy(list_path, out)
+                cmd = cut_command_copy(list_path, out, tmp_out)
             log("cut:", " ".join(cmd))
             p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=FF_ENV, preexec_fn=PREEXEC)
             job["proc"] = p
@@ -2550,16 +2570,17 @@ class ThumbSheet(Gtk.Window):
                     list_path.unlink()
                 except OSError:
                     pass
-            if job["cancel"].is_set():
+            if job["cancel"].is_set() or p.returncode != 0 or not tmp_out.exists():
                 try:
-                    out.unlink()
+                    tmp_out.unlink()
                 except OSError:
                     pass
-                GLib.idle_add(self._cut_done, job, None, "cancelado")
+                if job["cancel"].is_set():
+                    GLib.idle_add(self._cut_done, job, None, "cancelado")
+                else:
+                    GLib.idle_add(self._cut_done, job, None, err[-400:] or ("ffmpeg terminó con código %s" % p.returncode))
                 return
-            if p.returncode != 0 or not out.exists():
-                GLib.idle_add(self._cut_done, job, None, err[-400:] or ("ffmpeg terminó con código %s" % p.returncode))
-                return
+            os.replace(str(tmp_out), str(out))
             dur = None
             try:
                 r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(out)],

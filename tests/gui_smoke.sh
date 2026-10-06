@@ -17,7 +17,7 @@ rm -rf "$OUT/cache" "$OUT/config"
 COPY="$OUT/video/copia-$(basename "$VIDEO_A")"; cp -f "$VIDEO_A" "$COPY"
 Xvfb :77 -screen 0 1400x900x24 -nolisten tcp >/dev/null 2>&1 &
 XPID=$!
-trap 'kill $APP 2>/dev/null; kill $XPID 2>/dev/null' EXIT
+trap 'kill $APP 2>/dev/null || true; kill $XPID 2>/dev/null || true' EXIT
 sleep 1
 THUMBSHEET_DEBUG=1 python3 "$DIR/thumbsheet.py" "$COPY" "$VIDEO_B" >"$OUT/app.log" 2>&1 &
 APP=$!

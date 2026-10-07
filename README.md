@@ -2,7 +2,7 @@
 
 Sábana de miniaturas de vídeo para Linux (GTK3). Abres uno o varios vídeos y aparece un mosaico con
 una captura cada N segundos. Controles: **Intervalo** (1 s, 2 s, 5, 10, 20, 30 s, 1, 2, 5 o 10 min),
-**Tamaño** (teselas por fila, de 3 a 20; el ancho se adapta a la ventana), y a la derecha del contador
+**Tamaño** (teselas por fila, de 20 a la izquierda a 3 a la derecha: hacia la derecha, más grandes; el ancho se adapta a la ventana), y a la derecha del contador
 los botones **Cortar**, **LLC** y **Eliminar**. Al cambiar el tamaño o el intervalo, la tesela que estaba
 en el centro del visor sigue en el centro.
 
@@ -11,10 +11,10 @@ thumbsheet vídeo.mp4 [otro.mkv ...]   # o "Abrir con" desde el gestor de archiv
 thumbsheet                            # sin argumentos: diálogo para elegir vídeos
 ```
 
-- **Varios vídeos**: se listan en el panel izquierdo (nombre, duración y resolución, y a la izquierda
-  de la segunda línea un icono de mosaico que indica el estado de sus miniaturas para el intervalo
-  actual: casi invisible si están pendientes, traslúcido mientras se generan, sólido cuando están
-  todas); clic para ver cada sábana. Se añaden más con `Ctrl+O` o arrastrándolos a la ventana. Cuando el vídeo a la vista
+- **Varios vídeos**: se listan en el panel izquierdo, con una cabecera que dice cuántos hay. Cada fila
+  muestra nombre, duración y resolución, y a la derecha de la segunda línea un icono de mosaico con el
+  estado de sus miniaturas para el intervalo actual: casi invisible si están pendientes, traslúcido
+  mientras se generan, sólido cuando están todas. Clic para ver cada sábana. Se añaden más con `Ctrl+O` o arrastrándolos a la ventana. Cuando el vídeo a la vista
   termina de generarse, los demás se van generando **en segundo plano** al mismo intervalo, de uno en
   uno; el vídeo a la vista y los cambios de intervalo tienen siempre prioridad.
 - **Estado**: junto a los botones, arriba el mensaje (capturas, duración, resolución, segmentos) y
@@ -28,8 +28,8 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   arrastre a las teselas sanas de su tramo.
 - **Selección**: clic = alternar una tesela; clic y arrastrar = aplicar a un rango contiguo;
   `Shift`+clic = seleccionar todo entre la última tesela pulsada y esta; doble clic sobre una
-  seleccionada = deseleccionar todo su tramo contiguo. Las seleccionadas se recuadran en rojo. `Esc`
-  deselecciona todo. Lo que se guarda son **segmentos de
+  seleccionada = deseleccionar todo su tramo contiguo; `Ctrl+A` = seleccionar todo el vídeo. Las
+  seleccionadas se recuadran en rojo. `Esc` deselecciona todo. Lo que se guarda son **segmentos de
   tiempo**, no teselas: una tesela está marcada si su tramo `[t, t+intervalo)` cae dentro de un
   segmento. Por eso al cambiar el intervalo la selección no se trocea: al afinarlo (10 → 5 s) las
   teselas intermedias aparecen marcadas; al engrosarlo (5 → 10 s) se ven marcadas las teselas que tocan
@@ -76,7 +76,7 @@ se tira nunca (vive en la caché de disco). Los intervalos de 1 y 2 s decodifica
 tramos (con GPU si la hay): en vídeos largos tardan.
 
 Atajos: la rueda sobre cada slider mueve un paso; `Ctrl+rueda` sobre el mosaico o `Ctrl +/-` cambian
-las teselas por fila; `Esc` deselecciona; `Ctrl+Q` cierra.
+las teselas por fila; `Ctrl+A` selecciona todo; `Esc` deselecciona; `Ctrl+Q` cierra.
 
 ## Instalación (Ubuntu / Mint / Debian)
 

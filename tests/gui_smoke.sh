@@ -49,6 +49,7 @@ chk() { [[ "$2" == "$3" ]] && ok "$1" || ko "$1 → $2 (esperado $3)"; }
 # 0. al terminar el vídeo actual, el otro se genera en segundo plano al mismo intervalo
 for i in $(seq 1 20); do grep -q "fin: .*\[$(basename "$VIDEO_B")\]" "$OUT/app.log" && break; sleep 0.5; done
 grep -q "segundo plano: $(basename "$VIDEO_B")" "$OUT/app.log" && grep -q "fin: .*\[$(basename "$VIDEO_B")\]" "$OUT/app.log" && ok "el segundo vídeo se generó en segundo plano al terminar el primero" || ko "sin generación en segundo plano del segundo vídeo"
+grep -q "archivos: 2" "$OUT/app.log" && ok "cabecera del panel: 2 archivos" || ko "cabecera del panel: $(grep -o 'archivos: [0-9]*' "$OUT/app.log" | tail -1)"
 NB=$(ls "$SEL"/*/ -d | wc -l); [[ "$NB" -ge 2 ]] && ok "hay caché para los dos vídeos ($NB directorios)" || ko "directorios de caché: $NB"
 
 # 1. rueda sobre el slider de intervalo: un paso = siguiente valor de la lista (30 s → 1 min)
@@ -134,7 +135,7 @@ centrado_ok() { python3 -c "import sys; a=int(sys.argv[1]); b=int(sys.argv[2]); 
 # columnas exactas con el teclado: clic en el slider (toma el foco) y flechas hasta el valor deseado
 to_cols() { local want=$1 n; xdotool mousemove $((X+TX)) $((Y+TY)) click 1; sleep 0.4
   for i in $(seq 1 24); do n=$(ncols); [[ -z "$n" ]] && n=$COLS; [[ "$n" == "$want" ]] && break
-    if (( n < want )); then xdotool key Right; else xdotool key Left; fi; sleep 0.25; done; sleep 0.8; }
+    if (( n < want )); then xdotool key Left; else xdotool key Right; fi; sleep 0.25; done; sleep 0.8; }   # slider invertido
 grep -q "eta: · faltan" "$OUT/app.log" && ok "la barra de progreso muestra el tiempo estimado ($(grep -o 'eta: · faltan ~[0-9:]*' "$OUT/app.log" | head -1 | sed 's/eta: · //'))" || ko "sin tiempo estimado en la barra (eta:)"
 B=$(basename "$VIDEO_B"); grep -q "estado: $B → generando" "$OUT/app.log" && grep -q "estado: $B → listas" "$OUT/app.log" && ok "icono de estado del panel: $B pasó por generando → listas" || ko "icono de estado: $(grep 'estado:' "$OUT/app.log" | tail -3 | tr '\n' ';')"
 to_cols 9; shot 8-mas-columnas 0.3
@@ -142,8 +143,14 @@ to_cols 9; shot 8-mas-columnas 0.3
 to_cols 5; shot 9-menos-columnas 0.3
 [[ "$(ncols)" == 5 ]] && centrado_ok "$(centro)" "$(ahora)" "$(ncols)" "$(S)" && ok "menos columnas (5): la tesela central ($(centro) s) sigue centrada (ahora $(ahora) s)" || ko "menos columnas: cols=$(ncols) centro antes $(centro) s, después $(ahora) s"
 
+# 9b. Ctrl+A selecciona todo el vídeo como un único segmento
+xdotool windowfocus --sync "$WID"; xdotool key ctrl+a; sleep 0.6
+DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$COPY")
+python3 -c "import json,sys; d=json.loads(sys.argv[1])['segments']; D=float(sys.argv[2]); sys.exit(0 if len(d)==1 and d[0][0]==0 and abs(d[0][1]-D)<1 else 1)" "$(sel)" "$DUR" && ok "Ctrl+A selecciona todo (0–${DUR%.*} s en un segmento)" || ko "Ctrl+A: selección $(sel)"
+shot 9b-ctrl-a 0.3
+
 # 10. Escape limpia la selección
-xdotool windowfocus --sync "$WID"; xdotool key Escape; sleep 0.6
+xdotool key Escape; sleep 0.6
 ls "$SEL"/*/selection.json >/dev/null 2>&1 && ko "Escape no limpió la selección" || ok "Escape limpia la selección"
 
 # 10b. Cortar y borrar original: la primera pulsación sólo arma el botón (se desarma solo a los 5 s); la
@@ -164,6 +171,7 @@ for i in $(seq 1 60); do grep -q "cut: original borrado\|cut: error" "$OUT/app.l
 grep -q "toast ok: Cortado.*original borrado" "$OUT/app.log" && ok "toast verde: cortado y original borrado" || ko "sin toast de cortado+borrado: $(grep 'toast' "$OUT/app.log" | tail -1)"
 sleep 2; shot 10b-tras-cortar-borrar 0.5
 [[ "$(grep -c "vídeo: $(basename "$VIDEO_B")" "$OUT/app.log" || true)" -gt "$NV" && "$(shown)" == "$(basename "$VIDEO_B")" ]] && ok "el original sale del panel y se abre el siguiente de la lista ($(basename "$VIDEO_B"))" || ko "tras cortar y borrar se muestra '$(shown)'"
+grep -q "archivos: 1" "$OUT/app.log" && ok "cabecera del panel: 1 archivo tras cortar y borrar" || ko "cabecera no bajó a 1: $(grep -o 'archivos: [0-9]*' "$OUT/app.log" | tail -1)"
 sleep 1.5; grep -q "segundo plano: $(basename "$CUT")\|vídeo: $(basename "$CUT")\|estado: $(basename "$CUT")" "$OUT/app.log" && ko "el cortado se añadió al panel" || ok "los cortados no se añaden al panel (ninguno de los dos)"
 
 # 11. Eliminar con confirmación (Alt+E en el diálogo) sobre el vídeo a la vista: la copia de B (la lista
@@ -175,6 +183,7 @@ if [[ "$(shown)" == "$(basename "$VIDEO_B")" ]]; then
 else ko "Eliminar omitido: a la vista está '$(shown)', no la copia de B"; fi
 [[ -f "$VIDEO_B_ORIG" && -f "$VIDEO_A" ]] || { echo "¡¡un vídeo ORIGINAL ha desaparecido!!"; fail=1; }
 grep -q "toast ok: Eliminado" "$OUT/app.log" && ok "toast verde al eliminar" || ko "sin toast ok al eliminar"
+grep -q "archivos: 0" "$OUT/app.log" && ok "cabecera del panel: sin archivos tras eliminar" || ko "cabecera no bajó a 0: $(grep -o 'archivos: [0-9]*' "$OUT/app.log" | tail -1)"
 shot 11-tras-eliminar 1
 
 # 12. cierre limpio y SIGKILL en plena generación

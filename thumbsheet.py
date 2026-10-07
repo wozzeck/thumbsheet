@@ -1946,8 +1946,10 @@ class ThumbSheet(Gtk.Window):
         for n in (3, 5, 10, 15, 20):
             self.tile_scale.add_mark(n, Gtk.PositionType.BOTTOM, str(n))
         self.tile_scale.set_hexpand(True)
+        self.tile_scale.set_inverted(True)   # 20 por fila a la izquierda, 3 a la derecha: hacia la derecha, más grandes
         self.tile_scale.set_value(cols)
-        self.tile_scale.set_tooltip_text("Teselas por fila (3–20; rueda = ±1; Ctrl+rueda sobre el mosaico)")
+        self.tile_scale.set_tooltip_text("Teselas por fila, de 20 a 3: hacia la derecha, más grandes "
+                                         "(rueda = un paso; Ctrl+rueda sobre el mosaico)")
         bar.pack_start(self.tile_scale, True, True, 0)
         self.tile_label = Gtk.Label(label="")
         self.tile_label.set_width_chars(10)
@@ -2012,12 +2014,21 @@ class ThumbSheet(Gtk.Window):
         threading.Thread(target=self._full_loop, name="ts-full", daemon=True).start()
         side = Gtk.ScrolledWindow()
         side.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        side.set_size_request(140, -1)
         self.listbox = Gtk.ListBox()
         self.listbox.set_selection_mode(Gtk.SelectionMode.BROWSE)
         self.listbox.connect("row-selected", self.on_row_selected)
         side.add(self.listbox)
-        self.paned.pack1(side, False, False)
+        self.count_label = Gtk.Label(label="")
+        self.count_label.set_xalign(0.0)
+        header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        header.get_style_context().add_class("ts-panel-header")
+        header.pack_start(self.count_label, True, True, 0)
+        panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        panel.set_size_request(140, -1)
+        panel.pack_start(header, False, False, 0)
+        panel.pack_start(side, True, True, 0)
+        self.paned.pack1(panel, False, False)
+        self._update_count()
         self.scroller = Gtk.ScrolledWindow()
         self.scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.ALWAYS)
         self.sheet = Sheet()
@@ -2035,7 +2046,7 @@ class ThumbSheet(Gtk.Window):
         self.interval_scale.connect("value-changed", self.on_interval_changed)
         self.interval_scale.connect("scroll-event", self._slider_scroll, 1)
         self.tile_scale.connect("value-changed", self.on_tile_changed)
-        self.tile_scale.connect("scroll-event", self._slider_scroll, 1)
+        self.tile_scale.connect("scroll-event", self._slider_scroll, -1)   # rueda arriba = teselas más grandes
         self.scroller.connect("scroll-event", self.on_scroll)
         self.connect("key-press-event", self.on_key)
         self.connect("destroy", self.on_destroy)
@@ -2092,8 +2103,16 @@ class ThumbSheet(Gtk.Window):
             doc.row.show_all()
             self._probe_q.put(doc)
             first_new = first_new or doc
+        if first_new is not None:
+            self._update_count()
         if first_new is not None and self.current is None:
             self.listbox.select_row(first_new.row)
+
+    def _update_count(self):
+        n = len(self.docs)
+        self.count_label.set_text("Sin archivos" if n == 0 else "1 archivo" if n == 1 else "%d archivos" % n)
+        if DEBUG:
+            log("archivos: %d" % n)
 
     def _make_row(self, doc):
         row = Gtk.ListBoxRow()
@@ -2113,8 +2132,8 @@ class ThumbSheet(Gtk.Window):
         sub.set_markup("<small>%s</small>" % GLib.markup_escape_text(doc.subtitle))
         state = StateIcon()
         line2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-        line2.pack_start(state, False, False, 0)
         line2.pack_start(sub, True, True, 0)
+        line2.pack_end(state, False, False, 0)
         box.pack_start(name, False, False, 0)
         box.pack_start(line2, False, False, 0)
         row.add(box)
@@ -2393,6 +2412,18 @@ class ThumbSheet(Gtk.Window):
             return
         doc.selection = Selection()
         self.sheet.set_selected(set())
+        doc.save_selection()
+        self._refresh_status()
+        self._update_buttons()
+
+    def select_all(self):
+        """Ctrl+A: todo el vídeo como un único segmento."""
+        doc = self.current
+        if doc is None or doc.info is None:
+            return
+        doc.selection = Selection([(0.0, float(doc.info.duration))])
+        ts, S, dur = self._grid()
+        self.sheet.set_selected(doc.selection.tiles(ts, S, dur))
         doc.save_selection()
         self._refresh_status()
         self._update_buttons()
@@ -2894,6 +2925,7 @@ class ThumbSheet(Gtk.Window):
             self.current = None
         if row is not None:
             self.listbox.remove(row)
+        self._update_count()
         if not was_current:
             return
         if show_next and self.docs:
@@ -2995,6 +3027,9 @@ class ThumbSheet(Gtk.Window):
         if ctrl and event.keyval == Gdk.KEY_o:
             self.add_paths(choose_videos(self))
             return True
+        if ctrl and event.keyval == Gdk.KEY_a:
+            self.select_all()
+            return True
         if ctrl and event.keyval in (Gdk.KEY_plus, Gdk.KEY_equal, Gdk.KEY_KP_Add):
             self.tile_scale.set_value(self.tile_scale.get_value() - 1)
             return True
@@ -3061,6 +3096,8 @@ def main(argv):
         .ts-toast label, .ts-toast button { color: #ffffff; }
         .ts-toast label selection { background-color: #ffffff; color: #c62828; }
         .dim-label { opacity: 0.8; }
+        .ts-panel-header { padding: 6px 8px; background-color: alpha(@theme_fg_color, 0.06);
+                           border-bottom: 1px solid alpha(@theme_fg_color, 0.15); }
         scale marks { color: alpha(currentColor, 0.8); }
         progressbar { color: alpha(@theme_fg_color, 0.8); }
     """)

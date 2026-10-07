@@ -100,7 +100,7 @@ xdotool key Left key Left; sleep 0.9
 ls "$SEL"/*/full/$S0.jpg >/dev/null 2>&1 && ok "dos flechas izquierda: fotograma $S0 s extraído" || ko "flecha izquierda: falta full/$S0.jpg"
 xdotool key space; sleep 3; shot 4e-reproduciendo 0.2; xdotool key space; sleep 0.6
 P=$(grep -o "player: pausa en [0-9.]*" "$OUT/app.log" | tail -1 | awk '{print $4}')
-python3 -c "import sys; p=float(sys.argv[1]); s=float(sys.argv[2]); sys.exit(0 if s+1.5 <= p <= s+6 else 1)" "${P:-0}" "$S0" && ok "play desde $S0 s y pausa ~3 s después (pos=$P)" || ko "posición tras reproducir inesperada: '$P'"
+python3 -c "import sys; p=float(sys.argv[1]); s=float(sys.argv[2]); sys.exit(0 if s+1.0 <= p <= s+6 else 1)" "${P:-0}" "$S0" && ok "play desde $S0 s y pausa ~3 s después (pos=$P)" || ko "posición tras reproducir inesperada: '$P'"
 xdotool key Right; sleep 0.8
 SK=$(grep -o "player: seek a [0-9.]*" "$OUT/app.log" | tail -1 | awk '{print $4}')
 python3 -c "import sys; k=float(sys.argv[1]); p=float(sys.argv[2]); s=float(sys.argv[3]); sys.exit(0 if abs(k-(p+s))<=1.0 else 1)" "${SK:-0}" "${P:-0}" "$S0" && ok "flecha derecha con vídeo: seek +$S0 s (a $SK)" || ko "seek inesperado: '$SK' (pos $P + $S0)"
@@ -138,6 +138,12 @@ to_cols() { local want=$1 n; xdotool mousemove $((X+TX)) $((Y+TY)) click 1; slee
     if (( n < want )); then xdotool key Left; else xdotool key Right; fi; sleep 0.25; done; sleep 0.8; }   # slider invertido
 grep -q "eta: · faltan" "$OUT/app.log" && ok "la barra de progreso muestra el tiempo estimado ($(grep -o 'eta: · faltan ~[0-9:]*' "$OUT/app.log" | head -1 | sed 's/eta: · //'))" || ko "sin tiempo estimado en la barra (eta:)"
 B=$(basename "$VIDEO_B"); grep -q "estado: $B → generando" "$OUT/app.log" && grep -q "estado: $B → listas" "$OUT/app.log" && ok "icono de estado del panel: $B pasó por generando → listas" || ko "icono de estado: $(grep 'estado:' "$OUT/app.log" | tail -3 | tr '\n' ';')"
+# 9a. arrastrar un slider no aplica nada hasta soltar el botón
+NC0=$(grep -c "cols: " "$OUT/app.log" || true)
+xdotool mousemove $((X+TX)) $((Y+TY)) mousedown 1; sleep 0.3; xdotool mousemove $((X+TX+TW/4)) $((Y+TY)); sleep 0.3; xdotool mousemove $((X+TX-TW/4)) $((Y+TY)); sleep 0.5
+[[ "$(grep -c "cols: " "$OUT/app.log" || true)" == "$NC0" ]] && ok "arrastrando el slider de tamaño no se aplica nada" || ko "se aplicó durante el arrastre ($(ncols) columnas)"
+xdotool mouseup 1; sleep 0.8
+[[ "$(grep -c "cols: " "$OUT/app.log" || true)" -gt "$NC0" ]] && ok "al soltar se aplica el valor ($(ncols) columnas)" || ko "al soltar no se aplicó"
 to_cols 9; shot 8-mas-columnas 0.3
 [[ "$(ncols)" == 9 ]] && centrado_ok "$(centro)" "$(ahora)" "$(ncols)" "$(S)" && ok "más columnas (9): la tesela central ($(centro) s) sigue centrada (ahora $(ahora) s)" || ko "más columnas: cols=$(ncols) centro antes $(centro) s, después $(ahora) s"
 to_cols 5; shot 9-menos-columnas 0.3

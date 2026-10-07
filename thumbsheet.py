@@ -2049,6 +2049,12 @@ class ThumbSheet(Gtk.Window):
         self.interval_scale.connect("scroll-event", self._slider_scroll, 1)
         self.tile_scale.connect("value-changed", self.on_tile_changed)
         self.tile_scale.connect("scroll-event", self._slider_scroll, -1)   # rueda arriba = teselas más grandes
+        # arrastrando con el ratón, el valor se aplica al soltar (la etiqueta sí va cambiando); con la rueda
+        # o el teclado, que son pasos sueltos, al momento
+        self._slider_drag = set()
+        for sc in (self.interval_scale, self.tile_scale):
+            sc.connect("button-press-event", self._slider_press)
+            sc.connect("button-release-event", self._slider_release)
         self.scroller.connect("scroll-event", self.on_scroll)
         self.connect("key-press-event", self.on_key)
         self.connect("destroy", self.on_destroy)
@@ -2954,13 +2960,31 @@ class ThumbSheet(Gtk.Window):
             scale.set_value(round(v))   # re-entra ya en una posición entera (clic en la pista, arrastre fino...)
             return
         self._update_labels()
-        if self._regen_id:
-            GLib.source_remove(self._regen_id)
-        self._regen_id = GLib.timeout_add(self.REGEN_DEBOUNCE_MS, self.regenerate)
+        if scale not in self._slider_drag:
+            self._apply_slider(scale)
 
     def on_tile_changed(self, scale):
         self._update_labels()
-        self.sheet.set_cols(int(round(scale.get_value())))
+        if scale not in self._slider_drag:
+            self._apply_slider(scale)
+
+    def _slider_press(self, scale, event):
+        self._slider_drag.add(scale)
+        return False
+
+    def _slider_release(self, scale, event):
+        if scale in self._slider_drag:
+            self._slider_drag.discard(scale)
+            self._apply_slider(scale)
+        return False
+
+    def _apply_slider(self, scale):
+        if scale is self.interval_scale:
+            if self._regen_id:
+                GLib.source_remove(self._regen_id)
+            self._regen_id = GLib.timeout_add(self.REGEN_DEBOUNCE_MS, self.regenerate)
+        else:
+            self.sheet.set_cols(int(round(scale.get_value())))
 
     def _wheel_steps(self, event, key):
         """Pasos de rueda (+1 arriba / -1 abajo); con scroll suave acumula hasta completar un paso."""

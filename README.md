@@ -75,7 +75,8 @@ La caché va por segundo, así que las capturas coincidentes entre intervalos se
 se tira nunca (vive en la caché de disco). Los intervalos de 1 y 2 s decodifican el vídeo entero por
 tramos (con GPU si la hay): en vídeos largos tardan.
 
-Atajos: la rueda sobre cada slider mueve un paso; `Ctrl+rueda` sobre el mosaico o `Ctrl +/-` cambian
+Los sliders aplican su valor al soltar el ratón (mientras arrastras sólo cambia la etiqueta); con la
+rueda o el teclado, al momento. Atajos: la rueda sobre cada slider mueve un paso; `Ctrl+rueda` sobre el mosaico o `Ctrl +/-` cambian
 las teselas por fila; `Ctrl+A` selecciona todo; `Esc` deselecciona; `Ctrl+Q` cierra.
 
 ## Instalación (Ubuntu / Mint / Debian)

@@ -201,17 +201,11 @@ if kill -0 $APP 2>/dev/null; then ko "la app no cerró con Ctrl+Q"; kill $APP; s
 left=$(pgrep -c -x ffmpeg || true); [[ "$left" == 0 ]] && ok "sin ffmpeg tras cerrar" || ko "ffmpeg vivos tras cerrar: $left"
 rm -rf "$OUT/cache"; cp -f "$VIDEO_A" "$COPY"
 python3 - "$OUT/config/thumbsheet/settings.json" <<'PY'
-import json, sys, pathlib; f = pathlib.Path(sys.argv[1]); d = json.loads(f.read_text()) if f.exists() else {}; d["interval"] = 5; d["levels"] = True; f.parent.mkdir(parents=True, exist_ok=True); f.write_text(json.dumps(d))
+import json, sys, pathlib; f = pathlib.Path(sys.argv[1]); d = json.loads(f.read_text()) if f.exists() else {}; d["interval"] = 5; f.parent.mkdir(parents=True, exist_ok=True); f.write_text(json.dumps(d))
 PY
 THUMBSHEET_DEBUG=1 python3 "$DIR/thumbsheet.py" "$COPY" >"$OUT/app2.log" 2>&1 &
 APP=$!
-# con Niveles activado, en cuanto hay ~100 capturas (de 287) ya están TODAS las de cada minuto, repartidas por el vídeo
-for i in $(seq 1 24); do n=$({ ls "$SEL"/*/*.jpg 2>/dev/null || true; } | wc -l); [[ "$n" -ge 100 ]] && break; sleep 0.25; done
-python3 - "$SEL" "$DUR" <<'PY' && ok "niveles: con $n capturas hechas ya están las 24 de cada minuto de todo el vídeo" || ko "niveles: faltan capturas de cada minuto con $n hechas"
-import sys, pathlib; cache = next(pathlib.Path(sys.argv[1]).glob("*/")); D = float(sys.argv[2])
-have = set(int(p.stem) for p in cache.glob("*.jpg") if not p.name.startswith(".")); need = set(range(0, int(D) - 1, 60))
-sys.exit(0 if need <= have and len(have) < 287 else 1)
-PY
+for i in $(seq 1 24); do n=$({ ls "$SEL"/*/*.jpg 2>/dev/null || true; } | wc -l); [[ "$n" -ge 100 ]] && break; sleep 0.25; done   # en plena generación
 busy=$(pgrep -c -x ffmpeg || true); kill -9 $APP 2>/dev/null; sleep 1.5   # SIGTERM por PDEATHSIG: ffmpeg termina limpio, no instantáneo
 left2=$(pgrep -c -x ffmpeg || true); [[ "$busy" -gt 0 && "$left2" == 0 ]] && ok "SIGKILL en plena generación: $busy ffmpeg → 0" || ko "SIGKILL: antes=$busy después=$left2"
 echo "--- log"; grep -v "geometry" "$OUT/app.log" | tail -8 | cut -c1-160

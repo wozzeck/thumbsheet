@@ -409,22 +409,18 @@ class Generator(object):
     on_progress(done, total), on_done(). Cancelable (mata los ffmpeg en marcha).
 
     Orden de trabajo (ver _task_key): primero lo que está a la vista (focus_fn), luego lo que viene por delante
-    y al final lo que quedó atrás; con `levels`, entre medias van los niveles gruesos de todo el vídeo (10 min,
-    5 min, 1 min…). El orden no añade coste: en modo seek son las mismas capturas y en modo tramos los niveles
-    extra se acotan al 10 % del trabajo."""
+    y al final lo que quedó atrás. Sólo cambia el orden, no el trabajo."""
 
     GPU_WORKERS = 2
 
-    def __init__(self, info, cache_dir, interval, on_tile, on_progress, on_done, on_failed=None,
-                 focus_fn=None, levels=False):
+    def __init__(self, info, cache_dir, interval, on_tile, on_progress, on_done, on_failed=None, focus_fn=None):
         self.info = info
         self.cache_dir = cache_dir
         self.S = snap_interval(interval)
         self.on_tile, self.on_progress, self.on_done = on_tile, on_progress, on_done
         self.on_failed = on_failed or (lambda t: False)
         self.focus_fn = focus_fn or (lambda: None)   # () -> (t_lo, t_hi) a la vista, o None (segundo plano)
-        self.levels = bool(levels)
-        self._order_key = None                       # (foco, niveles) con que se ordenó la cola la última vez
+        self._order_key = None                       # foco con el que se ordenó la cola la última vez
         self.pending_ts = set()                      # instantes sin resolver: cada uno se cuenta una sola vez
         self.initial_done = 0      # capturas que ya estaban en caché al arrancar (para estimar el ritmo)
         self.eta_logged = False
@@ -445,17 +441,8 @@ class Generator(object):
         gop = info.gop if info.gop is not None else max(400.0 / info.fps, 20.0)
         # coste por captura: seek ≈ decodificar GOP/2 + arranque (~1 s de vídeo equivalente); tramos ≈ S
         self.mode = "seek" if (gop / 2.0 + 1.0) < self.S else "range"
-        # niveles: intervalos más gruesos múltiplos de S (10 min → 5 min → 1 min…). En modo seek son las mismas
-        # capturas en otro orden (gratis). En modo tramos son capturas EXTRA por seek, a ~(GOP/2+1) s de
-        # decodificación cada una frente a 1 s/s de la pasada continua: sólo los niveles cuyo coste total queda
-        # por debajo del 10 % (L >= 10·(GOP/2+1)).
-        chain = [L for L in INTERVALS if L > self.S and L % self.S == 0]
-        if self.mode == "range":
-            chain = [L for L in chain if L >= 10.0 * (gop / 2.0 + 1.0)]
-        self.level_ints = sorted(chain, reverse=True)
-        log("plan: S=%d capturas=%d gop=%.1fs fps=%.2f modo=%s workers=%d niveles=%s [%s]" % (
-            self.S, self.total, gop, info.fps, self.mode, self.workers,
-            ",".join(str(L) for L in self.level_ints) if self.levels else "no", info.path.name))
+        log("plan: S=%d capturas=%d gop=%.1fs fps=%.2f modo=%s workers=%d [%s]" % (
+            self.S, self.total, gop, info.fps, self.mode, self.workers, info.path.name))
 
     # --- API ---
     def start(self):
@@ -486,10 +473,6 @@ class Generator(object):
                 self.tasks.append(("seek", t))
         else:
             self._make_chunks(missing)
-            if self.levels:
-                for t in missing:   # esqueleto grueso por seek antes de la pasada continua (coste acotado)
-                    if self._level_rank(t) < len(self.level_ints):
-                        self.tasks.append(("seek", t))
         self.pending = len(self.tasks)
         nworkers = min(self.workers, len(self.tasks))
         for i in range(nworkers):
@@ -544,48 +527,37 @@ class Generator(object):
             i = j
 
     # --- orden de trabajo ---
-    def _level_rank(self, t):
-        """Nivel más grueso del que t es múltiplo (0 = el más grueso); len(level_ints) si no es de ninguno."""
-        for i, L in enumerate(self.level_ints):
-            if t % L == 0:
-                return i
-        return len(self.level_ints)
-
-    def _task_key(self, task, focus):
-        """Prioridad (menor = antes). A la vista: por tiempo. Después, con niveles, los gruesos de todo el vídeo;
-        y en cada grupo primero lo que viene por delante (lo más cercano antes) y al final lo que quedó atrás."""
+    @staticmethod
+    def _task_key(task, focus):
+        """Prioridad (menor = antes). A la vista: por tiempo. Después lo que viene por delante (lo más cercano
+        antes) y al final lo que quedó atrás."""
         if task[0] == "seek":
             a = b = task[1]
         else:
             a, b = task[1][0], task[1][-1]
-        if focus is not None:
-            lo, hi = focus
-            if b >= lo and a <= hi:
-                return (0, 0, 0, a)
-            ahead = a > hi
-            dist = a - hi if ahead else lo - b
-        else:
-            ahead, dist = True, a
-        rank = 0
-        if self.levels:
-            rank = self._level_rank(a) if task[0] == "seek" else len(self.level_ints)
-        return (1, rank, 0 if ahead else 1, dist)
+        if focus is None:
+            return (1, 0, a)
+        lo, hi = focus
+        if b >= lo and a <= hi:
+            return (0, 0, a)
+        if a > hi:
+            return (1, 0, a - hi)
+        return (1, 1, lo - b)
 
     def _pop_task(self):
-        """Siguiente tarea según el foco actual. Sólo reordena si el foco (o el modo) ha cambiado desde la última
-        vez: en reposo no cuesta nada; mientras se hace scroll, un sort de la cola por captura (milisegundos)."""
+        """Siguiente tarea según el foco actual. Sólo reordena si el foco ha cambiado desde la última vez: en
+        reposo no cuesta nada; mientras se hace scroll, un sort de la cola por captura (milisegundos)."""
         with self.lock:
             if not self.tasks:
                 return None
             focus = self.focus_fn()
-            key = (focus, self.levels)
-            if key != self._order_key:
-                self._order_key = key
+            if focus != self._order_key:
+                self._order_key = focus
                 self.tasks.sort(key=lambda tk: self._task_key(tk, focus), reverse=True)   # la mejor al final: pop() O(1)
                 if DEBUG:
                     first = self.tasks[-1]
-                    log("orden: foco=%s niveles=%s primera=%s" % (
-                        ("%d-%d" % focus) if focus else "ninguno", self.levels,
+                    log("orden: foco=%s primera=%s" % (
+                        ("%d-%d" % focus) if focus else "ninguno",
                         first[1] if first[0] == "seek" else "%d..%d" % (first[1][0], first[1][-1])))
             return self.tasks.pop()
 
@@ -2048,12 +2020,6 @@ class ThumbSheet(Gtk.Window):
         self.interval_label.set_width_chars(6)
         self.interval_label.set_xalign(0.0)
         bar.pack_start(self.interval_label, False, False, 0)
-        self.levels_btn = Gtk.ToggleButton(label="Niveles")
-        self.levels_btn.set_active(bool(self.settings.get("levels", False)))
-        self.levels_btn.set_tooltip_text("Orden de generación. Activado: por niveles de intervalo (primero una captura cada "
-                                         "10 min, luego cada 5 min, 1 min…) para tener antes una vista de todo el vídeo. "
-                                         "Desactivado: por orden. Lo que está en pantalla va siempre primero.")
-        bar.pack_start(self.levels_btn, False, False, 0)
 
         bar.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 6)
 
@@ -2165,7 +2131,6 @@ class ThumbSheet(Gtk.Window):
 
         self.interval_scale.connect("value-changed", self.on_interval_changed)
         self.interval_scale.connect("scroll-event", self._slider_scroll, 1)
-        self.levels_btn.connect("toggled", self.on_levels_toggled)
         self.tile_scale.connect("value-changed", self.on_tile_changed)
         self.tile_scale.connect("scroll-event", self._slider_scroll, -1)   # rueda arriba = teselas más grandes
         # arrastrando con el ratón, el valor se aplica al soltar (la etiqueta sí va cambiando); con la rueda
@@ -2207,11 +2172,10 @@ class ThumbSheet(Gtk.Window):
             return "%d,%d" % (x + a.width // 2, y + a.height // 2)
         sx, sy = origin(self.sheet)
         rows = ";".join(center(d.row) for d in self.docs if d.row is not None)
-        log("geometry: sheet=%d,%d cols=%d cell=%dx%d pad=%d gap=%d interval=%s tile=%s tilew=%d llc=%s cut=%s del=%s "
-            "levels=%s rows=%s" % (
-                sx, sy, self.sheet.cols, self.sheet.cell_w, self.sheet.cell_h, Sheet.PAD, Sheet.GAP,
-                center(self.interval_scale), center(self.tile_scale), self.tile_scale.get_allocation().width,
-                center(self.llc_btn), center(self.cut_btn), center(self.del_btn), center(self.levels_btn), rows))
+        log("geometry: sheet=%d,%d cols=%d cell=%dx%d pad=%d gap=%d interval=%s tile=%s tilew=%d llc=%s cut=%s del=%s rows=%s" % (
+            sx, sy, self.sheet.cols, self.sheet.cell_w, self.sheet.cell_h, Sheet.PAD, Sheet.GAP,
+            center(self.interval_scale), center(self.tile_scale), self.tile_scale.get_allocation().width,
+            center(self.llc_btn), center(self.cut_btn), center(self.del_btn), rows))
         return False
 
     # ---- documentos --------------------------------------------------------------------------
@@ -2340,8 +2304,7 @@ class ThumbSheet(Gtk.Window):
                         lambda d, n: self.on_progress(d, n) if current() else False,
                         lambda: self.on_done() if current() else False,
                         lambda t: on_failed(t) if current() else False,
-                        focus_fn=self.sheet.focus_range if foreground else None,
-                        levels=self.levels_btn.get_active())
+                        focus_fn=self.sheet.focus_range if foreground else None)
         holder.append(gen)
         self.generator = gen
         self.gen_doc = doc
@@ -3090,10 +3053,6 @@ class ThumbSheet(Gtk.Window):
         if scale not in self._slider_drag:
             self._apply_slider(scale)
 
-    def on_levels_toggled(self, btn):
-        self.settings["levels"] = btn.get_active()
-        self.regenerate()   # replanifica lo que falte con el orden nuevo (lo ya generado se conserva)
-
     def _slider_press(self, scale, event):
         self._slider_drag.add(scale)
         return False
@@ -3209,7 +3168,7 @@ class ThumbSheet(Gtk.Window):
         if self.generator:
             self.generator.cancel()
         w, h = self.get_size()
-        settings = dict(self.settings)   # conserva cut_mode, levels… que se guardan al cambiar
+        settings = dict(self.settings)   # conserva cut_mode y lo demás que se guarda al cambiar
         settings.update({
             "interval": self.current_interval(),
             "cols": int(round(self.tile_scale.get_value())),

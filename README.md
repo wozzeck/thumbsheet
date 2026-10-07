@@ -1,7 +1,7 @@
 # thumbsheet
 
 Sábana de miniaturas de vídeo para Linux (GTK3). Abres uno o varios vídeos y aparece un mosaico con
-una captura cada N segundos. Controles: **Intervalo** (1 s, 2 s, 5, 10, 20, 30 s, 1, 2, 5 o 10 min),
+una captura cada N segundos. Controles: **Intervalo** (1 s, 2 s, 5, 10, 20, 30 s, 1, 5 o 10 min),
 **Tamaño** (teselas por fila, de 20 a la izquierda a 3 a la derecha: hacia la derecha, más grandes; el ancho se adapta a la ventana), y a la derecha del contador
 los botones **Cortar**, **LLC** y **Eliminar**. Al cambiar el tamaño o el intervalo, la tesela que estaba
 en el centro del visor sigue en el centro.
@@ -17,6 +17,15 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   mientras se generan, sólido cuando están todas. Clic para ver cada sábana. Se añaden más con `Ctrl+O` o arrastrándolos a la ventana. Cuando el vídeo a la vista
   termina de generarse, los demás se van generando **en segundo plano** al mismo intervalo, de uno en
   uno; el vídeo a la vista y los cambios de intervalo tienen siempre prioridad.
+- **Orden de generación**: lo que está en pantalla se genera primero, luego lo que viene por delante y al
+  final lo que ha quedado atrás al hacer scroll; la cola se reordena con cada movimiento, así que en un
+  equipo lento puedes avanzar por la sábana más deprisa de lo que se genera y ver siempre lo que miras.
+  El botón **Niveles**, junto al intervalo, cambia el orden base de lo que no está en pantalla: activado,
+  primero una captura cada 10 min de todo el vídeo, luego cada 5 min, cada minuto… hasta el intervalo
+  elegido, para tener enseguida una vista global que se va refinando; desactivado, por orden. Nada de
+  esto cuesta tiempo extra: en modo *seek* son las mismas capturas en otro orden, y en modo *tramos*
+  (1–2 s) los niveles se limitan a los que suman menos del 10 % del trabajo (1 min y más gruesos en una
+  grabación con keyframes cada 6 s).
 - **Estado**: junto a los botones, arriba el mensaje (capturas, duración, resolución, segmentos) y
   abajo una barra de progreso: generación del vídeo actual, generación en segundo plano (con el nombre
   del fichero) o avance del corte, con el tiempo que falta estimado por el ritmo medio de la operación

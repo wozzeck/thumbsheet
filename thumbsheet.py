@@ -3099,7 +3099,7 @@ def main(argv):
         .ts-toast label selection { background-color: #ffffff; color: #c62828; }
         .dim-label { opacity: 0.8; }
         .ts-sheet-scroll scrollbar.vertical slider { min-width: 16px; min-height: 56px; border-radius: 10px; }
-        .ts-sheet-scroll scrollbar.vertical { background-color: #1e1e20; }
+        .ts-sheet-scroll scrollbar.vertical { background-color: #1c1c1f; border: none; }   /* sin la raya clara de Adwaita */
         .ts-panel-header { padding: 6px 8px; background-color: alpha(@theme_fg_color, 0.06);
                            border-bottom: 1px solid alpha(@theme_fg_color, 0.15); }
         scale marks { color: alpha(currentColor, 0.8); }

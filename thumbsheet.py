@@ -2031,6 +2031,8 @@ class ThumbSheet(Gtk.Window):
         self._update_count()
         self.scroller = Gtk.ScrolledWindow()
         self.scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.ALWAYS)
+        self.scroller.set_overlay_scrolling(False)   # barra clásica, siempre visible, con el asa ancha (CSS)
+        self.scroller.get_style_context().add_class("ts-sheet-scroll")
         self.sheet = Sheet()
         self.sheet.set_cols(cols)
         self.sheet.vadj = self.scroller.get_vadjustment()
@@ -3096,6 +3098,8 @@ def main(argv):
         .ts-toast label, .ts-toast button { color: #ffffff; }
         .ts-toast label selection { background-color: #ffffff; color: #c62828; }
         .dim-label { opacity: 0.8; }
+        .ts-sheet-scroll scrollbar.vertical slider { min-width: 16px; min-height: 56px; border-radius: 10px; }
+        .ts-sheet-scroll scrollbar.vertical { background-color: #1e1e20; }
         .ts-panel-header { padding: 6px 8px; background-color: alpha(@theme_fg_color, 0.06);
                            border-bottom: 1px solid alpha(@theme_fg_color, 0.15); }
         scale marks { color: alpha(currentColor, 0.8); }

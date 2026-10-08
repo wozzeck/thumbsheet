@@ -145,6 +145,17 @@ def eta_text(started, done, remaining):
     return " · faltan ~%s" % fmt_time(eta)
 
 
+def fit_pad_vf(W, H):
+    """Filtro de escala que encaja CADA fotograma en la caja W×H respetando su propia relación de aspecto
+    (`dar`, que incluye el SAR de los anamórficos) y rellena de negro hasta W×H. Así un vídeo que cambia de
+    orientación a mitad (o de resolución) no sale deformado: el tramo vertical se ve con bandas laterales. El
+    tamaño de salida es constante, que es lo que necesitan la cadena fps/tramos y el encoder. trunc(…/2)*2
+    redondea hacia abajo a par para no desbordar la caja; el 0.999 absorbe el redondeo de la caja nominal."""
+    r = repr(W / float(H) * 0.999)
+    return ("scale=w='if(gte(dar,%s),%d,trunc(%d*dar/2)*2)':h='if(gte(dar,%s),trunc(%d/dar/2)*2,%d)',"
+            "pad=%d:%d:(ow-iw)/2:(oh-ih)/2" % (r, W, H, r, W, H, W, H))
+
+
 def _nice_prefix():
     pre = ["nice", "-n", "10"] if shutil.which("nice") else []
     if shutil.which("ionice"):
@@ -355,13 +366,13 @@ class Gpu(object):
         workdir.mkdir(parents=True, exist_ok=True)
         t = min(max(1.0, info.duration / 3.0), 30.0)
         sw, hw = workdir / "sw.jpg", workdir / "hw.jpg"
-        size = "scale=%d:%d" % (info.thumb_w, info.thumb_h)
+        size = fit_pad_vf(info.thumb_w, info.thumb_h)
         cmds = [
             FFMPEG + SW_DEC + ["-ss", "%.3f" % t, "-i", str(info.path), "-map", "0:v:0", "-an", "-sn", "-dn",
                                "-frames:v", "1", "-vf", size, "-q:v", "4", "-f", "image2", "-update", "1", "-y", str(sw)],
             FFMPEG + Gpu.dec_opts(device) + ["-ss", "%.3f" % t, "-i", str(info.path), "-map", "0:v:0", "-an",
                                              "-sn", "-dn", "-frames:v", "1",
-                                             "-vf", "scale_vaapi=w=%d:h=%d,hwdownload,format=nv12" % (info.thumb_w, info.thumb_h),
+                                             "-vf", "scale_vaapi" + size.replace("scale", "", 1).replace(",pad", ",hwdownload,format=nv12,pad", 1),
                                              "-q:v", "4", "-f", "image2", "-update", "1", "-y", str(hw)],
         ]
         try:
@@ -634,7 +645,7 @@ class Generator(object):
     def _do_seek(self, t):
         final = self.cache_dir / ("%d.jpg" % t)
         tmp = self.cache_dir / (".%d.tmp.jpg" % t)
-        vf = "scale=%d:%d" % (self.info.thumb_w, self.info.thumb_h)
+        vf = fit_pad_vf(self.info.thumb_w, self.info.thumb_h)
         cmd = FFMPEG + SW_DEC + ["-ss", str(t), "-i", str(self.info.path)] + self._out_opts(1, vf, str(tmp))
         p = self._run(cmd)
         if p is None:
@@ -667,11 +678,13 @@ class Generator(object):
         # es el primero con t >= T: son el mismo o adyacentes). start_time=0 ancla la ranura 0 al
         # arranque del tramo aunque el primer fotograma caiga unas milésimas después.
         fps = "fps=1/%d:round=up:start_time=0" % self.S
+        fit = fit_pad_vf(self.info.thumb_w, self.info.thumb_h)
         if dev:
-            vf = "%s,scale_vaapi=w=%d:h=%d,hwdownload,format=nv12" % (fps, self.info.thumb_w, self.info.thumb_h)
+            # mismo encaje en la GPU: el pad va tras bajar el fotograma a memoria
+            vf = "%s,scale_vaapi%s" % (fps, fit.replace("scale", "", 1).replace(",pad", ",hwdownload,format=nv12,pad", 1))
             dec = Gpu.dec_opts(dev)
         else:
-            vf = "%s,scale=%d:%d" % (fps, self.info.thumb_w, self.info.thumb_h)
+            vf = "%s,%s" % (fps, fit)
             dec = SW_DEC
         cmd = FFMPEG + dec + ["-ss", str(a), "-t", "%.1f" % dur, "-i", str(self.info.path)] + \
             self._out_opts(n, vf, str(tmpdir / "%d.jpg"))

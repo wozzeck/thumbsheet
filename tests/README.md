@@ -10,6 +10,10 @@
   (`<t>.fail`), forman un sufijo coherente con el corte, el documento cuenta como completo y una
   segunda pasada no las reintenta. También prueba `eta_text`. El vídeo debe tener la cabecera `moov`
   al principio (faststart), como los de WhatsApp o Teams.
+- `test_orientation.py <clip horizontal>` — sin pantalla. Construye un vídeo que pasa de horizontal a
+  vertical y vuelve (concat de un clip y su transpuesto) y comprueba, en modo seek y en modo tramos, que
+  todas las miniaturas salen del tamaño nominal y que el tramo vertical lleva bandas laterales en vez de
+  deformarse.
 - `gui_smoke.sh <vídeo A> <vídeo B> [out]` — abre la app en un Xvfb propio (no toca tu pantalla) con
   COPIAS de A y de B (las dos se borran durante la prueba; los originales no se tocan), y con xdotool: rueda sobre el slider de intervalo, clic y arrastre de
   teselas, botón LLC (verifica el proyecto), Cortar, cambio de vídeo, Escape, Cortar y borrar original

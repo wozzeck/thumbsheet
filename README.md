@@ -28,6 +28,10 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   abajo una barra de progreso: generación del vídeo actual, generación en segundo plano (con el nombre
   del fichero) o avance del corte, con el tiempo que falta estimado por el ritmo medio de la operación
   (aparece en cuanto hay base para calcularlo y se refresca cada segundo).
+- **Cambios de orientación o resolución**: cada fotograma se encaja en la caja de la miniatura
+  respetando su propia proporción (también el SAR de los anamórficos) y se rellena de negro, así que un
+  vídeo que pasa de horizontal a vertical a mitad no sale deformado: el tramo vertical se ve con bandas
+  laterales. Las miniaturas mantienen siempre el tamaño nominal del vídeo.
 - **Zonas dañadas**: si de un instante no se puede sacar fotograma (vídeo truncado, datos corruptos),
   la tesela muestra un aspa roja en lugar de quedarse en gris. Queda anotado en la caché, así que no se
   vuelve a intentar; para reintentar, borra la caché de ese vídeo. En modo tramos, lo que un tramo no

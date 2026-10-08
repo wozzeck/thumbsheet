@@ -17,8 +17,10 @@ Pensado para máquinas modestas:
 import collections
 import ctypes
 import hashlib
+import bisect
 import json
 import math
+import re
 import os
 import pathlib
 import queue
@@ -145,15 +147,19 @@ def eta_text(started, done, remaining):
     return " · faltan ~%s" % fmt_time(eta)
 
 
-def fit_pad_vf(W, H):
-    """Filtro de escala que encaja CADA fotograma en la caja W×H respetando su propia relación de aspecto
-    (`dar`, que incluye el SAR de los anamórficos) y rellena de negro hasta W×H. Así un vídeo que cambia de
-    orientación a mitad (o de resolución) no sale deformado: el tramo vertical se ve con bandas laterales. El
-    tamaño de salida es constante, que es lo que necesitan la cadena fps/tramos y el encoder. trunc(…/2)*2
-    redondea hacia abajo a par para no desbordar la caja; el 0.999 absorbe el redondeo de la caja nominal."""
+def fit_vf(W, H):
+    """Filtro de escala que encaja el fotograma en la caja W×H respetando SU relación de aspecto (`dar`, que
+    incluye el SAR de los anamórficos): la miniatura sale con su proporción real, sin deformar ni rellenar.
+    trunc(…/2)*2 redondea hacia abajo a par; el 0.999 absorbe el redondeo de la caja nominal."""
     r = repr(W / float(H) * 0.999)
-    return ("scale=w='if(gte(dar,%s),%d,trunc(%d*dar/2)*2)':h='if(gte(dar,%s),trunc(%d/dar/2)*2,%d)',"
-            "pad=%d:%d:(ow-iw)/2:(oh-ih)/2" % (r, W, H, r, W, H, W, H))
+    return "scale=w='if(gte(dar,%s),%d,trunc(%d*dar/2)*2)':h='if(gte(dar,%s),trunc(%d/dar/2)*2,%d)'" % (r, W, H, r, W, H)
+
+
+def fit_box(aspect, W, H):
+    """Tamaño (par) de una miniatura de aspecto `aspect` encajada en W×H; mismo redondeo que fit_vf."""
+    if aspect >= W / float(H) * 0.999:
+        return W, max(2, int(W / aspect / 2) * 2)
+    return max(2, int(H * aspect / 2) * 2), H
 
 
 def _nice_prefix():
@@ -194,7 +200,25 @@ try:
 except OSError:
     _LIBC = None
     PREEXEC = None
-FFMPEG = NICE + ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error"]
+FFMPEG_BASE = NICE + ["ffmpeg", "-nostdin", "-hide_banner"]
+FFMPEG = FFMPEG_BASE + ["-loglevel", "error"]
+FFMPEG_INFO = FFMPEG_BASE + ["-loglevel", "info", "-nostats"]   # para leer lo que imprime showinfo
+def _showinfo_filter():
+    """showinfo sin sumas de verificación (coste por fotograma) si este ffmpeg admite la opción (≥ 4.3)."""
+    try:
+        r = subprocess.run(["ffmpeg", "-hide_banner", "-h", "filter=showinfo"], stdout=subprocess.PIPE,
+                           stderr=subprocess.DEVNULL, timeout=10)
+        if b"checksum" in r.stdout:
+            return "showinfo=checksum=0"
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return "showinfo"
+
+
+SHOWINFO = _showinfo_filter()
+_RE_SHOW_N = re.compile(r"\bn:\s*(\d+)\b")
+_RE_SHOW_S = re.compile(r"\bs:(\d+)x(\d+)\b")
+_RE_SHOW_SAR = re.compile(r"\bsar:(\d+)/(\d+)\b")
 # decodificador software: 1 hilo por proceso (el paralelismo va entre capturas), sin B-frames ni
 # filtro de desbloqueo (invisible a tamaño de miniatura, ahorra un 20-30 % de CPU)
 SW_DEC = ["-threads", "1", "-skip_frame", "noref", "-skip_loop_filter", "all", "-flags2", "+fast"]
@@ -366,13 +390,13 @@ class Gpu(object):
         workdir.mkdir(parents=True, exist_ok=True)
         t = min(max(1.0, info.duration / 3.0), 30.0)
         sw, hw = workdir / "sw.jpg", workdir / "hw.jpg"
-        size = fit_pad_vf(info.thumb_w, info.thumb_h)
+        size = "scale=%d:%d" % (info.thumb_w, info.thumb_h)
         cmds = [
             FFMPEG + SW_DEC + ["-ss", "%.3f" % t, "-i", str(info.path), "-map", "0:v:0", "-an", "-sn", "-dn",
                                "-frames:v", "1", "-vf", size, "-q:v", "4", "-f", "image2", "-update", "1", "-y", str(sw)],
             FFMPEG + Gpu.dec_opts(device) + ["-ss", "%.3f" % t, "-i", str(info.path), "-map", "0:v:0", "-an",
                                              "-sn", "-dn", "-frames:v", "1",
-                                             "-vf", "scale_vaapi" + size.replace("scale", "", 1).replace(",pad", ",hwdownload,format=nv12,pad", 1),
+                                             "-vf", "scale_vaapi=w=%d:h=%d,hwdownload,format=nv12" % (info.thumb_w, info.thumb_h),
                                              "-q:v", "4", "-f", "image2", "-update", "1", "-y", str(hw)],
         ]
         try:
@@ -424,12 +448,17 @@ class Generator(object):
 
     GPU_WORKERS = 2
 
-    def __init__(self, info, cache_dir, interval, on_tile, on_progress, on_done, on_failed=None, focus_fn=None):
+    def __init__(self, info, cache_dir, interval, on_tile, on_progress, on_done, on_failed=None, focus_fn=None,
+                 on_aspect=None):
         self.info = info
         self.cache_dir = cache_dir
         self.S = snap_interval(interval)
         self.on_tile, self.on_progress, self.on_done = on_tile, on_progress, on_done
         self.on_failed = on_failed or (lambda t: False)
+        self.on_aspect = on_aspect or (lambda t, a: False)   # on_aspect(t, a): la miniatura t no tiene el aspecto nominal
+        self.nominal = info.aspect
+        self.aspects = {}            # t -> aspecto real de las que difieren del nominal (sidecar aspects.json)
+        self._aspects_dirty = 0
         self.focus_fn = focus_fn or (lambda: None)   # () -> (t_lo, t_hi) a la vista, o None (segundo plano)
         self._order_key = None                       # foco con el que se ordenó la cola la última vez
         self.pending_ts = set()                      # instantes sin resolver: cada uno se cuenta una sola vez
@@ -470,9 +499,16 @@ class Generator(object):
         missing = [t for t in self.timestamps if t not in cached and t not in failed]
         self.pending_ts = set(missing)
         self.done_count = self.initial_done = self.total - len(missing)
+        try:
+            data = json.loads((self.cache_dir / "aspects.json").read_text(encoding="utf-8"))
+            self.aspects = dict((int(k), float(v)) for k, v in data.items())
+        except (OSError, ValueError, TypeError, AttributeError):
+            self.aspects = {}
         for t in self.timestamps:
             if t in cached:
                 self.on_tile(t)
+                if t in self.aspects:
+                    self.on_aspect(t, self.aspects[t])
             elif t in failed:
                 self.on_failed(t)   # ya se intentó y no hay fotograma: no se reintenta
         self._progress()
@@ -501,6 +537,7 @@ class Generator(object):
         with self.lock:
             self.tasks.clear()
             procs = list(self.procs)
+        self._flush_aspects()
         for p in procs:
             try:
                 p.terminate()
@@ -617,23 +654,120 @@ class Generator(object):
             if last:
                 GLib.idle_add(self._finish)
 
-    def _run(self, cmd, timeout=None):
+    def _run(self, cmd, timeout=None, stderr_path=None):
+        """Lanza ffmpeg. Con `stderr_path`, su stderr va a ese fichero en vez de a una tubería: los tramos imprimen
+        showinfo (y avisos por fotograma) y una tubería de 64 KB se llena y bloquea a ffmpeg mientras aquí se
+        espera a que termine."""
         if self.cancelled.is_set():
             return None
-        p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, preexec_fn=PREEXEC, env=FF_ENV)
+        fh = open(str(stderr_path), "wb") if stderr_path is not None else None
+        try:
+            p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=fh if fh is not None else subprocess.PIPE,
+                                 preexec_fn=PREEXEC, env=FF_ENV)
+        finally:
+            if fh is not None:
+                fh.close()
+        p.ts_stderr_path = stderr_path
         with self.lock:
             self.procs.add(p)
         return p
 
     def _wait(self, p):
+        """(ok, stderr) del proceso."""
         try:
             _, err = p.communicate()
         finally:
             with self.lock:
                 self.procs.discard(p)
+        if err is None:
+            try:
+                err = pathlib.Path(p.ts_stderr_path).read_bytes()
+            except (OSError, TypeError):
+                err = b""
+        err = err.decode("utf-8", "replace")
         if p.returncode != 0 and not self.cancelled.is_set():
-            log("ffmpeg rc=%s: %s" % (p.returncode, err.decode("utf-8", "replace").strip()[-300:]))
-        return p.returncode == 0
+            log("ffmpeg rc=%s: %s" % (p.returncode, err.strip()[-300:]))
+        return p.returncode == 0, err
+
+    # --- aspecto real de cada miniatura (vídeos que cambian de orientación o resolución) ---
+    def _note_aspect(self, t, w, h, sar=1.0):
+        """Apunta el aspecto real de la miniatura t si difiere del nominal y avisa (on_aspect)."""
+        if not w or not h:
+            return
+        a = (w * sar) / float(h)
+        with self.lock:
+            if abs(a / self.nominal - 1.0) <= 0.02:
+                changed = self.aspects.pop(t, None) is not None
+                a = self.nominal
+            else:
+                changed = abs(self.aspects.get(t, 0.0) - a) > 1e-3
+                self.aspects[t] = a
+            if changed:
+                self._aspects_dirty += 1
+            flush = self._aspects_dirty >= 8
+        if changed:
+            GLib.idle_add(self.on_aspect, t, a)
+        if flush:
+            self._flush_aspects()
+
+    def _flush_aspects(self):
+        """Sidecar aspects.json: {t: aspecto} de las no nominales, para no releer miles de JPEG al abrir."""
+        with self.lock:
+            if not self._aspects_dirty:
+                return
+            self._aspects_dirty = 0
+            data = dict((str(t), round(a, 4)) for t, a in sorted(self.aspects.items()))
+        try:
+            tmp = self.cache_dir / ".aspects.json.tmp"
+            tmp.write_text(json.dumps(data), encoding="utf-8")
+            os.replace(str(tmp), str(self.cache_dir / "aspects.json"))
+        except OSError:
+            pass
+
+    def _fix_aspects(self, ts, published, err):
+        """Modo tramos: ffmpeg no puede cambiar el tamaño de salida a mitad, así que el tramo sale todo a W×H y un
+        fotograma de otra proporción llega deformado. showinfo (antes de escalar) deja en stderr el tamaño y SAR
+        reales de cada fotograma de salida: se apunta el aspecto y las de proporción distinta se re-encajan a su
+        tamaño natural (la imagen deformada conserva toda la información: sólo se le devuelve su forma)."""
+        sizes = {}
+        for line in err.splitlines():
+            if " s:" not in line:
+                continue
+            mn, ms = _RE_SHOW_N.search(line), _RE_SHOW_S.search(line)
+            if not mn or not ms:
+                continue
+            sar = 1.0
+            msar = _RE_SHOW_SAR.search(line)
+            if msar and int(msar.group(1)) and int(msar.group(2)):
+                sar = int(msar.group(1)) / float(msar.group(2))
+            sizes[int(mn.group(1))] = (int(ms.group(1)), int(ms.group(2)), sar)
+        W, H = self.info.thumb_w, self.info.thumb_h
+        if DEBUG and sizes:
+            odd_n = sum(1 for (w, h, sar) in sizes.values() if abs((w * sar / float(h)) / self.nominal - 1.0) > 0.02)
+            if odd_n:
+                log("tramo %d..%d: %d fotogramas con otra proporción (de %d)" % (ts[0], ts[-1], odd_n, len(sizes)))
+        elif DEBUG:
+            log("tramo %d..%d: showinfo sin tamaños (stderr %d bytes)" % (ts[0], ts[-1], len(err)))
+        for k in range(published):
+            size = sizes.get(k)
+            if size is None:
+                continue
+            w, h, sar = size
+            a = (w * sar) / float(h)
+            odd = abs(a / self.nominal - 1.0) > 0.02
+            if odd:
+                tw, th = fit_box(a, W, H)
+                path = self.cache_dir / ("%d.jpg" % ts[k])
+                try:
+                    pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path), tw, th, False)
+                    tmp = self.cache_dir / (".%d.fix.jpg" % ts[k])
+                    pb.savev(str(tmp), "jpeg", ["quality"], ["88"])
+                    os.replace(str(tmp), str(path))
+                except (GLib.Error, OSError):
+                    continue
+            self._note_aspect(ts[k], w, h, sar)
+            if odd:
+                GLib.idle_add(self.on_tile, ts[k])   # que el mosaico recargue la miniatura ya re-encajada
 
     def _out_opts(self, n, vf, out):
         opts = ["-map", "0:v:0", "-an", "-sn", "-dn", "-vf", vf, "-frames:v", str(n), "-q:v", "4",
@@ -645,14 +779,20 @@ class Generator(object):
     def _do_seek(self, t):
         final = self.cache_dir / ("%d.jpg" % t)
         tmp = self.cache_dir / (".%d.tmp.jpg" % t)
-        vf = fit_pad_vf(self.info.thumb_w, self.info.thumb_h)
+        vf = fit_vf(self.info.thumb_w, self.info.thumb_h)   # con su proporción real
         cmd = FFMPEG + SW_DEC + ["-ss", str(t), "-i", str(self.info.path)] + self._out_opts(1, vf, str(tmp))
         p = self._run(cmd)
         if p is None:
             return False
-        ok = self._wait(p) and tmp.exists()
+        ok, _ = self._wait(p)
+        ok = ok and tmp.exists()
         if ok:
             os.replace(str(tmp), str(final))
+            try:
+                _fmt, w, h = GdkPixbuf.Pixbuf.get_file_info(str(final))   # sólo la cabecera: ~40 µs
+                self._note_aspect(t, w, h)
+            except GLib.Error:
+                pass
             self._tile_ready(t)
         else:
             try:
@@ -678,17 +818,19 @@ class Generator(object):
         # es el primero con t >= T: son el mismo o adyacentes). start_time=0 ancla la ranura 0 al
         # arranque del tramo aunque el primer fotograma caiga unas milésimas después.
         fps = "fps=1/%d:round=up:start_time=0" % self.S
-        fit = fit_pad_vf(self.info.thumb_w, self.info.thumb_h)
+        # salida a tamaño fijo W×H (ffmpeg no lo cambia a mitad de un tramo) y showinfo antes de escalar para saber
+        # el tamaño real de cada fotograma; -reinit_filter 0: si el tamaño cambia a mitad, el grafo no se reinicia
+        # (fps no pierde la cuenta, showinfo sigue numerando) y _fix_aspects re-encaja las de otra proporción
+        W, H = self.info.thumb_w, self.info.thumb_h
         if dev:
-            # mismo encaje en la GPU: el pad va tras bajar el fotograma a memoria
-            vf = "%s,scale_vaapi%s" % (fps, fit.replace("scale", "", 1).replace(",pad", ",hwdownload,format=nv12,pad", 1))
+            vf = "%s,%s,scale_vaapi=w=%d:h=%d,hwdownload,format=nv12" % (fps, SHOWINFO, W, H)
             dec = Gpu.dec_opts(dev)
         else:
-            vf = "%s,%s" % (fps, fit)
+            vf = "%s,%s,scale=%d:%d" % (fps, SHOWINFO, W, H)
             dec = SW_DEC
-        cmd = FFMPEG + dec + ["-ss", str(a), "-t", "%.1f" % dur, "-i", str(self.info.path)] + \
+        cmd = FFMPEG_INFO + dec + ["-reinit_filter", "0", "-ss", str(a), "-t", "%.1f" % dur, "-i", str(self.info.path)] + \
             self._out_opts(n, vf, str(tmpdir / "%d.jpg"))
-        p = self._run(cmd)
+        p = self._run(cmd, stderr_path=tmpdir / "stderr.txt")
         if p is None:
             shutil.rmtree(str(tmpdir), ignore_errors=True)
             return False
@@ -711,12 +853,13 @@ class Generator(object):
                     break
                 if not running:
                     break
-            ok = self._wait(p)
+            ok, err = self._wait(p)
             if self.cancelled.is_set():
                 return False
             if dev is not None and not (ok and published == n):
                 # la GPU sólo cuenta como OK si ha producido todo; si no, la CPU rehace lo que falte
                 return False
+            self._fix_aspects(ts, published, err)
             # lo que el tramo no ha producido (datos truncados o dañados) se reintenta una a una con seek;
             # lo que tampoco salga así queda marcado como no generable
             for i in range(published, n):
@@ -775,6 +918,7 @@ class Generator(object):
         if self.finished or self.cancelled.is_set():
             return False
         self.finished = True
+        self._flush_aspects()
         log("fin: %d capturas en %.1fs (%s) [%s]" % (self.total, time.time() - self.started, self.mode, self.info.path.name))
         self.on_done()
         return False
@@ -819,20 +963,21 @@ class Loader(object):
     """Hilo que decodifica miniaturas al tamaño pedido. Atiende primero lo último solicitado (lo que
     está en pantalla) y descarta lo que ya no se ve."""
 
-    def __init__(self, cache, visible_fn, redraw_fn):
+    def __init__(self, cache, visible_fn, redraw_fn, aspect_fn=None):
         self.cache = cache
         self.visible_fn = visible_fn      # () -> (set de t visibles o None=todo)
         self.redraw_fn = redraw_fn
+        self.aspect_fn = aspect_fn        # (t, aspecto) si el JPEG no tiene la proporción de su tesela
         self.cv = threading.Condition()
         self.queue = collections.OrderedDict()   # t -> (path, width)
         self.redraw_pending = False
         th = threading.Thread(target=self._run, name="ts-loader", daemon=True)
         th.start()
 
-    def request(self, t, path, width):
+    def request(self, t, path, width, height):
         with self.cv:
             self.queue.pop(t, None)
-            self.queue[t] = (path, width)
+            self.queue[t] = (path, width, height)
             self.cv.notify()
 
     def cancel_all(self):
@@ -844,15 +989,19 @@ class Loader(object):
             with self.cv:
                 while not self.queue:
                     self.cv.wait()
-                t, (path, width) = self.queue.popitem(last=True)
+                t, (path, width, height) = self.queue.popitem(last=True)
             vis = self.visible_fn()
             if vis is not None and t not in vis:
                 continue
             try:
-                pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path), width, -1, True)
+                pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path), width, height, True)
             except GLib.Error:
                 continue
             self.cache.put(t, pb)
+            if self.aspect_fn is not None and pb.get_height() > 0 and height > 0:
+                pa, ta = pb.get_width() / float(pb.get_height()), width / float(height)
+                if abs(pa / ta - 1.0) > 0.02:
+                    GLib.idle_add(self.aspect_fn, t, pa)   # red de seguridad: el JPEG manda sobre lo apuntado
             with self.cv:
                 if not self.redraw_pending:
                     self.redraw_pending = True
@@ -886,6 +1035,12 @@ class Sheet(Gtk.DrawingArea):
         self.cols = COLS_DEF
         self.cell_w = 160
         self.cell_h = 90
+        self.aspects = {}            # t -> aspecto real de las teselas que no son del aspecto nominal
+        self.row_y = None            # geometría por filas (None = rejilla regular, camino rápido)
+        self.row_h = None
+        self.tile_x = None
+        self.tile_w = None
+        self._aspect_relayout_id = None
         self.vadj = None                      # ajuste vertical del ScrolledWindow (lo pone la ventana)
         self.cache = PixCache(PIX_BUDGET)
         self.visible = (0, -1)
@@ -893,7 +1048,7 @@ class Sheet(Gtk.DrawingArea):
         self.vis_lock = threading.Lock()
         self.settled = True
         self._settle_id = None
-        self.loader = Loader(self.cache, self._visible_set, self.queue_draw)
+        self.loader = Loader(self.cache, self._visible_set, self.queue_draw, self.set_aspect)
         self.font = Pango.FontDescription("Sans 9")
         self.selected = set()                 # teselas marcadas: vista derivada de los segmentos del documento
         self.on_drag_begin = None             # () -> None            : la ventana guarda una instantánea
@@ -930,23 +1085,47 @@ class Sheet(Gtk.DrawingArea):
             self.queue_draw()
 
     # --- selección: clic = alternar una tesela; clic y arrastrar = aplicar a un rango contiguo ---
+    def _row_of_y(self, cy):
+        """Fila que contiene la y (relativa al PAD)."""
+        if self.row_y is None:
+            return int(cy // (self.cell_h + self.GAP))
+        return max(0, bisect.bisect_right(self.row_y, cy) - 1)
+
     def _tile_at(self, x, y, loose=False):
         if not self.ts:
             return None
+        n = len(self.ts)
         cx, cy = x - self.PAD, y - self.PAD
         if cx < 0 or cy < 0:
             if not loose:
                 return None
             cx, cy = max(0, cx), max(0, cy)
-        col, rx = divmod(int(cx), self.cell_w + self.GAP)
-        row, ry = divmod(int(cy), self.cell_h + self.GAP)
-        if loose:
-            col = min(col, self.cols - 1)
-        elif rx >= self.cell_w or ry >= self.cell_h or col >= self.cols:
-            return None
-        i = row * self.cols + col
-        if i >= len(self.ts):
-            return len(self.ts) - 1 if loose else None
+        row = self._row_of_y(cy)
+        if self.row_y is None:
+            col, rx = divmod(int(cx), self.cell_w + self.GAP)
+            ry = cy - row * (self.cell_h + self.GAP)
+            if loose:
+                col = min(col, self.cols - 1)
+            elif rx >= self.cell_w or ry >= self.cell_h or col >= self.cols:
+                return None
+            i = row * self.cols + col
+        else:
+            if row >= len(self.row_y):
+                return n - 1 if loose else None
+            if not loose and cy - self.row_y[row] >= self.row_h[row]:
+                return None   # en el hueco entre filas
+            lo, hi = row * self.cols, min(n, (row + 1) * self.cols)
+            i = None
+            for j in range(lo, hi):
+                if cx < self.tile_x[j] + self.tile_w[j]:
+                    i = j if (loose or cx >= self.tile_x[j]) else None
+                    break
+            if i is None:
+                if not loose:
+                    return None
+                i = hi - 1
+        if i >= n:
+            return n - 1 if loose else None
         return i
 
     def _nearest_index(self, t):
@@ -1038,6 +1217,7 @@ class Sheet(Gtk.DrawingArea):
         self.index = dict((t, i) for i, t in enumerate(self.ts))
         self.ready = set()
         self.failed = set()
+        self.aspects = {}   # el generador vuelve a avisar de las no nominales (sidecar) al arrancar
         with self.vis_lock:
             self.visible_core = (0, -1)   # índices de otro plan: sin foco hasta el primer dibujo
         self._relayout()
@@ -1055,14 +1235,33 @@ class Sheet(Gtk.DrawingArea):
         return False
 
     # --- posición de lectura: la tesela del centro del visor sigue en el centro al recomponer ---
+    def set_aspect(self, t, a):
+        """Aspecto real de la tesela t (lo apunta el generador al sacarla; el cargador lo confirma al leerla). Si
+        difiere del nominal, su fila se recompone: misma altura para todas, ancho según cada aspecto. Las
+        llegadas seguidas se agrupan en un solo recálculo."""
+        if a is None or a <= 0 or t not in self.index:
+            return False
+        if abs(a / self.aspect - 1.0) <= 0.02:
+            changed = self.aspects.pop(t, None) is not None
+        else:
+            changed = abs(self.aspects.get(t, 0.0) - a) > 1e-3
+            self.aspects[t] = a
+        if changed and self._aspect_relayout_id is None:
+            self._aspect_relayout_id = GLib.timeout_add(60, self._aspect_relayout)
+        return False
+
+    def _aspect_relayout(self):
+        self._aspect_relayout_id = None
+        self._relayout(force=True)
+        return False
+
     def center_time(self):
         """Instante de la tesela que está en el centro del visor (None si no hay plan)."""
         if not self.ts or self.vadj is None:
             return None
         y = self.vadj.get_value() + self.vadj.get_page_size() / 2.0
         rows = int(math.ceil(len(self.ts) / float(self.cols)))
-        row = int((y - self.PAD) // (self.cell_h + self.GAP))
-        row = max(0, min(rows - 1, row))
+        row = max(0, min(rows - 1, self._row_of_y(y - self.PAD)))
         i = min(len(self.ts) - 1, row * self.cols + self.cols // 2)
         return self.ts[i]
 
@@ -1078,7 +1277,10 @@ class Sheet(Gtk.DrawingArea):
             return False
         i = min(range(len(self.ts)), key=lambda k: abs(self.ts[k] - t))
         row = i // self.cols
-        y = self.PAD + row * (self.cell_h + self.GAP) + self.cell_h / 2.0
+        if self.row_y is not None and row < len(self.row_y):
+            y = self.PAD + self.row_y[row] + self.row_h[row] / 2.0
+        else:
+            y = self.PAD + row * (self.cell_h + self.GAP) + self.cell_h / 2.0
         page = self.vadj.get_page_size()
         upper = self.vadj.get_upper()
         self.vadj.set_value(max(0.0, min(max(0.0, upper - page), y - page / 2.0)))
@@ -1124,16 +1326,41 @@ class Sheet(Gtk.DrawingArea):
         return False
 
     # --- geometría ---
-    def _relayout(self):
+    def _relayout(self, force=False):
         width = max(1, self.get_allocated_width())
         avail = max(1, width - 2 * self.PAD)
         cols = max(1, self.cols_wanted)
         cell_w = max(24, (avail - (cols - 1) * self.GAP) // cols)
         cell_h = max(8, int(round(cell_w / self.aspect)))
-        rows = int(math.ceil(len(self.ts) / float(cols))) if self.ts else 0
-        total_h = 2 * self.PAD + rows * cell_h + max(0, rows - 1) * self.GAP
-        changed = (cols, cell_w, cell_h) != (self.cols, self.cell_w, self.cell_h)
+        n = len(self.ts)
+        rows = int(math.ceil(n / float(cols))) if n else 0
+        changed = force or (cols, cell_w, cell_h) != (self.cols, self.cell_w, self.cell_h)
         self.cols, self.cell_w, self.cell_h = cols, cell_w, cell_h
+        if not self.aspects:
+            # todas del aspecto nominal: rejilla regular
+            self.row_y = self.row_h = self.tile_x = self.tile_w = None
+            total_h = 2 * self.PAD + rows * cell_h + max(0, rows - 1) * self.GAP
+        else:
+            # filas de altura propia: las teselas de una fila miden lo mismo de alto y el ancho va con su aspecto,
+            # ocupando la fila entera (en la última, los huecos cuentan como teselas nominales). Una fila de
+            # verticales sale más alta que una mixta, y ésta más que una de horizontales. Sin márgenes negros.
+            inner = max(1.0, float(avail - (cols - 1) * self.GAP))
+            row_y, row_h, tile_x, tile_w = [], [], [], []
+            y = 0.0
+            for r in range(rows):
+                lo, hi = r * cols, min(n, (r + 1) * cols)
+                asp = [self.aspects.get(self.ts[i], self.aspect) for i in range(lo, hi)]
+                h = max(8.0, inner / (sum(asp) + (cols - (hi - lo)) * self.aspect))
+                row_y.append(y)
+                row_h.append(h)
+                x = 0.0
+                for a in asp:
+                    tile_x.append(x)
+                    tile_w.append(a * h)
+                    x += a * h + self.GAP
+                y += h + self.GAP
+            self.row_y, self.row_h, self.tile_x, self.tile_w = row_y, row_h, tile_x, tile_w
+            total_h = int(math.ceil(2 * self.PAD + y - self.GAP)) if rows else 2 * self.PAD
         if self.get_size_request()[1] != total_h:
             self.set_size_request(-1, total_h)
         if changed:
@@ -1141,9 +1368,12 @@ class Sheet(Gtk.DrawingArea):
 
     def _tile_rect(self, i):
         r, c = divmod(i, self.cols)
-        x = self.PAD + c * (self.cell_w + self.GAP)
-        y = self.PAD + r * (self.cell_h + self.GAP)
-        return x, y, self.cell_w, self.cell_h
+        if self.row_y is None or i >= len(self.tile_x):
+            x = self.PAD + c * (self.cell_w + self.GAP)
+            y = self.PAD + r * (self.cell_h + self.GAP)
+            return x, y, self.cell_w, self.cell_h
+        return (self.PAD + int(round(self.tile_x[i])), self.PAD + int(round(self.row_y[r])),
+                max(1, int(round(self.tile_w[i]))), max(1, int(round(self.row_h[r]))))
 
     def _redraw_tile(self, i):
         x, y, w, h = self._tile_rect(i)
@@ -1177,9 +1407,9 @@ class Sheet(Gtk.DrawingArea):
         if not self.ts:
             return False
         row_h = self.cell_h + self.GAP
-        r0 = max(0, int((y1 - self.PAD) // row_h))
-        r1 = int((y2 - self.PAD) // row_h)
-        i0 = r0 * self.cols
+        r0 = max(0, self._row_of_y(y1 - self.PAD))
+        r1 = self._row_of_y(y2 - self.PAD)
+        i0 = min(len(self.ts), r0 * self.cols)   # un repintado bajo el contenido (toast, vídeo corto) cae más allá
         i1 = min(len(self.ts) - 1, (r1 + 1) * self.cols - 1)
         # lo visible + una pantalla por delante y por detrás para que el scroll no muestre huecos
         margin = self.cols * max(1, int(math.ceil((y2 - y1) / float(row_h))))
@@ -1191,8 +1421,8 @@ class Sheet(Gtk.DrawingArea):
             vy2 = vy1 + vadj.get_page_size()
         else:
             vy1, vy2 = y1, y2
-        vr0 = max(0, int((vy1 - self.PAD) // row_h))
-        vr1 = int((vy2 - self.PAD) // row_h)
+        vr0 = max(0, self._row_of_y(vy1 - self.PAD))
+        vr1 = self._row_of_y(vy2 - self.PAD)
         core = (vr0 * self.cols, min(len(self.ts) - 1, (vr1 + 1) * self.cols - 1))
         with self.vis_lock:
             self.visible = (max(0, i0 - margin), min(len(self.ts) - 1, i1 + margin))
@@ -1205,7 +1435,8 @@ class Sheet(Gtk.DrawingArea):
         for i in list(range(max(0, i0 - margin), i0)) + list(range(i1 + 1, min(len(self.ts), i1 + 1 + margin))):
             t = self.ts[i]
             if t in self.ready and self.cache.get(t) is None:
-                self.loader.request(t, self.cache_dir / ("%d.jpg" % t), self.cell_w)
+                _x, _y, pw, ph = self._tile_rect(i)
+                self.loader.request(t, self.cache_dir / ("%d.jpg" % t), pw, ph)
         return False
 
     def _draw_tile(self, cr, layout, i):
@@ -1229,11 +1460,11 @@ class Sheet(Gtk.DrawingArea):
                 cr.line_to(cx - r, cy + r)
                 cr.stroke()
             elif t in self.ready:
-                self.loader.request(t, self.cache_dir / ("%d.jpg" % t), w)
+                self.loader.request(t, self.cache_dir / ("%d.jpg" % t), w, h)
         else:
             pw, ph = pb.get_width(), pb.get_height()
-            if pw != w and self.settled:
-                self.loader.request(t, self.cache_dir / ("%d.jpg" % t), w)
+            if (abs(pw - w) > 1 or abs(ph - h) > 1) and self.settled:
+                self.loader.request(t, self.cache_dir / ("%d.jpg" % t), w, h)
             if abs(pw - w) <= 1 and abs(ph - h) <= 1:
                 # tamaño exacto (±1 px de redondeo): copia directa, recortada a la celda
                 cr.save()
@@ -2386,12 +2617,14 @@ class ThumbSheet(Gtk.Window):
         current = lambda: self.generator is holder[0]  # noqa: E731
         on_tile = self.sheet.tile_ready if foreground else (lambda t: False)
         on_failed = self.sheet.tile_failed if foreground else (lambda t: False)
+        on_aspect = self.sheet.set_aspect if foreground else (lambda t, a: False)
         gen = Generator(doc.info, doc.cache_dir, S,
                         lambda t: on_tile(t) if current() else False,
                         lambda d, n: self.on_progress(d, n) if current() else False,
                         lambda: self.on_done() if current() else False,
                         lambda t: on_failed(t) if current() else False,
-                        focus_fn=self.sheet.focus_range if foreground else None)
+                        focus_fn=self.sheet.focus_range if foreground else None,
+                        on_aspect=lambda t, a: on_aspect(t, a) if current() else False)
         holder.append(gen)
         self.generator = gen
         self.gen_doc = doc

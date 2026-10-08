@@ -28,10 +28,15 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   abajo una barra de progreso: generación del vídeo actual, generación en segundo plano (con el nombre
   del fichero) o avance del corte, con el tiempo que falta estimado por el ritmo medio de la operación
   (aparece en cuanto hay base para calcularlo y se refresca cada segundo).
-- **Cambios de orientación o resolución**: cada fotograma se encaja en la caja de la miniatura
-  respetando su propia proporción (también el SAR de los anamórficos) y se rellena de negro, así que un
-  vídeo que pasa de horizontal a vertical a mitad no sale deformado: el tramo vertical se ve con bandas
-  laterales. Las miniaturas mantienen siempre el tamaño nominal del vídeo.
+- **Cambios de orientación o resolución**: cada miniatura sale con su propia proporción (también con el
+  SAR de los anamórficos), sin deformar ni rellenar. En el mosaico, las filas de un vídeo así tienen
+  altura propia: todas las teselas de una fila miden lo mismo de alto y el ancho va con su formato, de
+  modo que una fila de verticales es más alta que una mixta y ésta más que una de horizontales; las
+  columnas dejan de alinearse entre filas y no hay márgenes negros. En modo *tramos* ffmpeg no puede
+  cambiar el tamaño de salida a mitad, así que las de otra proporción se re-encajan al terminar el tramo
+  (un instante deformadas). La proporción de las no nominales se apunta en `aspects.json` junto a las
+  miniaturas. Las cachés generadas por versiones anteriores para vídeos así traen la deformación o las
+  bandas cocidas: bórralas para regenerarlas.
 - **Zonas dañadas**: si de un instante no se puede sacar fotograma (vídeo truncado, datos corruptos),
   la tesela muestra un aspa roja en lugar de quedarse en gris. Queda anotado en la caché, así que no se
   vuelve a intentar; para reintentar, borra la caché de ese vídeo. En modo tramos, lo que un tramo no

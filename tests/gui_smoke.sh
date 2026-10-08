@@ -127,9 +127,11 @@ xdotool mousemove $((X+${ROW1%,*})) $((Y+${ROW1#*,})) click 1; shot 6-vuelta 1.5
 xdotool mousemove $((X+IX)) $((Y+IY)) click 5 click 5 click 5 click 5; sleep 1.5     # 1 min → 5 s (conserva el centro)
 chk "intervalo a 5 s para tener scroll" "$(S)" "5"
 xdotool mousemove $((X+700)) $((Y+500)); for i in $(seq 1 12); do xdotool click 4; sleep 0.04; done; sleep 0.5   # a media altura del mosaico
-# prioridad por pantalla: tras el scroll, la cola se reordena y la primera captura pendiente cae en lo visible
-ORD=$(grep "orden: foco=[0-9]" "$OUT/app.log" | tail -1)
-python3 -c "import re,sys; m=re.search(r'foco=(\d+)-(\d+) .*primera=(\d+)', sys.argv[1]); sys.exit(0 if m and int(m.group(1)) <= int(m.group(3)) <= int(m.group(2)) else 1)" "$ORD" && ok "prioridad por pantalla: ${ORD#*] }" || ko "sin reorden por el scroll: '$ORD'"
+# prioridad por pantalla: con el scroll la cola se reordena y en alguna reordenación posterior a la inicial la primera
+# captura pendiente cae en lo visible (si la generación va más rápida que el scroll, lo visible ya está hecho y toca la
+# anterior: por eso basta con una)
+ORD=$(grep "orden: foco=[0-9]" "$OUT/app.log" | tail -n +2 | tr '\n' '|')
+python3 -c "import re,sys; ms=[m for m in re.finditer(r'foco=(\d+)-(\d+) .*?primera=(\d+)', sys.argv[1]) if int(m.group(1)) <= int(m.group(3)) <= int(m.group(2))]; print(ms[0].group(0) if ms else ''); sys.exit(0 if ms else 1)" "$ORD" > "$OUT/ord.txt" && ok "prioridad por pantalla: reordenada tras el scroll ($(cat "$OUT/ord.txt"))" || ko "ninguna reordenación tras el scroll empieza por lo visible: '$ORD'"
 shot 7-scroll 0.5
 centro() { { grep -o "cols: [0-9]* -> [0-9]*, centro t=[0-9]*" "$OUT/app.log" || true; } | tail -1 | sed 's/.*t=//'; }
 ncols() { { grep -o "cols: [0-9]* -> [0-9]*" "$OUT/app.log" || true; } | tail -1 | sed 's/.*-> //'; }
@@ -178,6 +180,7 @@ xdotool key alt+b
 for i in $(seq 1 60); do grep -q "cut: original borrado\|cut: error" "$OUT/app.log" && break; sleep 0.5; done
 [[ ! -f "$COPY" && -f "$CUT" ]] && ok "segunda pulsación: corta y borra el original" || ko "cortar y borrar: original=$([[ -f "$COPY" ]] && echo sigue || echo borrado) corte=$([[ -f "$CUT" ]] && echo sí || echo no) · $(grep 'cut:' "$OUT/app.log" | tail -1)"
 grep -q "toast ok: Cortado.*original borrado" "$OUT/app.log" && ok "toast verde: cortado y original borrado" || ko "sin toast de cortado+borrado: $(grep 'toast' "$OUT/app.log" | tail -1)"
+sleep 0.5; [[ -z "$(dlg)" ]] && ok "el diálogo de corte se cierra al terminar el corte (el borrado sigue en segundo plano)" || ko "el diálogo de corte sigue abierto"
 sleep 2; shot 10b-tras-cortar-borrar 0.5
 [[ "$(grep -c "vídeo: $(basename "$VIDEO_B")" "$OUT/app.log" || true)" -gt "$NV" && "$(shown)" == "$(basename "$VIDEO_B")" ]] && ok "el original sale del panel y se abre el siguiente de la lista ($(basename "$VIDEO_B"))" || ko "tras cortar y borrar se muestra '$(shown)'"
 grep -q "archivos: 1" "$OUT/app.log" && ok "cabecera del panel: 1 archivo tras cortar y borrar" || ko "cabecera no bajó a 1: $(grep -o 'archivos: [0-9]*' "$OUT/app.log" | tail -1)"

@@ -67,9 +67,13 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   al original y no se añade al panel (si ya estaba cargado, se vuelve a sondear porque ha cambiado). El botón de la derecha del diálogo, **Cortar y
   borrar original**, hace las dos cosas de una vez: hay que pulsarlo dos veces seguidas (la primera
   sólo lo arma, en rojo, y se desarma solo a los 5 s), y el original se borra únicamente si el corte
-  termina bien y la duración del resultado cuadra. Igual que con Eliminar, el original desaparece del
-  panel y se abre el siguiente de la lista.
-- **Eliminar**: borra el archivo de vídeo del disco directamente, sin papelera, tras confirmar.
+  termina bien y la duración del resultado cuadra. Mientras dura el corte el diálogo se queda abierto
+  mostrando el progreso, con Cancelar; en cuanto empieza el borrado se cierra, y el borrado va en
+  segundo plano como con Eliminar: el original desaparece del panel y se abre el siguiente de la lista.
+- **Eliminar**: borra el archivo de vídeo del disco directamente, sin papelera, tras confirmar. El borrado
+  (el fichero y su caché de miniaturas, que pueden ser miles) va en segundo plano: el diálogo se cierra al
+  momento, la fila queda como "Eliminando…" y se pasa al siguiente vídeo; al terminar sale el toast y la
+  fila desaparece.
 - **Avisos**: Cortar, LLC y Eliminar informan con un *toast* sobre el mosaico. Verde si ha ido bien,
   desaparece a los 3 s. Rojo si hubo un error: se queda hasta que lo cierres (`×` o `Esc`), con el texto
   seleccionable y un botón Copiar para pegar el mensaje donde haga falta.

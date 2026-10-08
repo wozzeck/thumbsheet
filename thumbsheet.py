@@ -889,8 +889,9 @@ class Sheet(Gtk.DrawingArea):
         self.on_preview = None                # (t) -> None           : clic derecho = ampliar a ventana completa
         self._drag = None
         self._anchor_t = None                 # última tesela pulsada con el botón izquierdo (para Shift+clic)
+        self._pending_center = None   # instante a recentrar en cuanto se asigne la nueva altura
         self.connect("draw", self.on_draw)
-        self.connect("size-allocate", lambda *_: self._relayout())
+        self.connect("size-allocate", self._on_size_allocate)
         self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK |
                         Gdk.EventMask.BUTTON1_MOTION_MASK)
         self.connect("button-press-event", self.on_press)
@@ -1052,24 +1053,42 @@ class Sheet(Gtk.DrawingArea):
         i = min(len(self.ts) - 1, row * self.cols + self.cols // 2)
         return self.ts[i]
 
+    def _on_size_allocate(self, *_):
+        self._relayout()
+        if self._pending_center is not None:
+            # ya con la altura nueva (el Viewport actualiza el ajuste antes de asignarnos): recentrar de verdad
+            t, self._pending_center = self._pending_center, None
+            self._apply_center(t, final=True)
+
+    def _apply_center(self, t, final=False):
+        if t is None or not self.ts or self.vadj is None:
+            return False
+        i = min(range(len(self.ts)), key=lambda k: abs(self.ts[k] - t))
+        row = i // self.cols
+        y = self.PAD + row * (self.cell_h + self.GAP) + self.cell_h / 2.0
+        page = self.vadj.get_page_size()
+        upper = self.vadj.get_upper()
+        self.vadj.set_value(max(0.0, min(max(0.0, upper - page), y - page / 2.0)))
+        if final:
+            log("scroll: centrada t=%d (cols=%d), centro real ahora t=%s" % (self.ts[i], self.cols, self.center_time()))
+        return False
+
     def scroll_to_time(self, t):
-        """Deja centrada la tesela más cercana a t. Se aplica ya (por si el alto no cambió) y otra vez en
-        idle, cuando el ScrolledWindow ya conoce la nueva altura y no recorta el valor."""
+        """Deja centrada la tesela más cercana a t. Se aplica ya (por si el alto no cambió) y de nuevo cuando GTK
+        asigna la altura nueva (size-allocate), que es cuando el ajuste deja de recortar el valor; si la altura
+        no cambia, no habrá asignación y vale con la primera. Un idle de respaldo cubre el caso en que la
+        asignación ya hubiera pasado."""
         if t is None or not self.ts or self.vadj is None:
             return
-        i = min(range(len(self.ts)), key=lambda k: abs(self.ts[k] - t))
+        self._apply_center(t)
+        self._pending_center = t
 
-        def apply(final=False):
-            row = i // self.cols
-            y = self.PAD + row * (self.cell_h + self.GAP) + self.cell_h / 2.0
-            page = self.vadj.get_page_size()
-            upper = self.vadj.get_upper()
-            self.vadj.set_value(max(0.0, min(max(0.0, upper - page), y - page / 2.0)))
-            if final:
-                log("scroll: centrada t=%d (cols=%d), centro real ahora t=%s" % (self.ts[i], self.cols, self.center_time()))
+        def fallback():
+            if self._pending_center is not None:
+                self._pending_center = None
+                self._apply_center(t, final=True)
             return False
-        apply()
-        GLib.idle_add(apply, True)
+        GLib.idle_add(fallback)
 
     def set_cols(self, n):
         n = int(max(COLS_MIN, min(COLS_MAX, n)))
@@ -1883,6 +1902,7 @@ class Document(object):
         self.selection = Selection()
         self.scroll = 0.0
         self.bg_tried = None                  # intervalo para el que ya se intentó generar en segundo plano
+        self.deleting = False                 # borrado en marcha (hilo aparte): fila insensible, no se genera
         self.row = None
         self.lock = threading.Lock()
 
@@ -2324,7 +2344,7 @@ class ThumbSheet(Gtk.Window):
         i0 = self.docs.index(start) + 1 if start in self.docs else 0
         for k in range(len(self.docs)):
             doc = self.docs[(i0 + k) % len(self.docs)]
-            if doc is self.current or doc.info is None or doc.bg_tried == S:
+            if doc is self.current or doc.info is None or doc.bg_tried == S or doc.deleting:
                 continue
             doc.bg_tried = S
             if doc_complete(doc, S):
@@ -2437,6 +2457,10 @@ class ThumbSheet(Gtk.Window):
                     self._cut["eta_logged"] = True
                     log("eta corte:%s" % eta)
                 self.progress.set_text("Cortando… %d %%%s" % (self._cut_pct, eta))
+            bar = self._cut.get("dlg_bar")
+            if bar is not None:   # diálogo de cortar y borrar: mismo progreso
+                bar.set_fraction(self.progress.get_fraction())
+                bar.set_text(self.progress.get_text())
             self._ensure_ticker()
         elif self.generator is not None and not self.generator.finished and self.generator.total:
             gen = self.generator
@@ -2813,21 +2837,43 @@ class ThumbSheet(Gtk.Window):
             box.pack_start(rb, False, False, 0)
         if self.settings.get("cut_mode") == "exact":
             exact.set_active(True)
+        content_widgets = [head, lossless, exact]   # lo que se oculta en modo progreso (el área de botones NO: cuelga del mismo box)
         if out.exists():
             warn = Gtk.Label(label="Ya existe %s: se sobrescribirá." % out.name)
             warn.set_xalign(0.0)
             box.pack_start(warn, False, False, 0)
+            content_widgets.append(warn)
         box.show_all()
         resp = dlg.run()
         use_exact = exact.get_active()
         if armed[0]:
             GLib.source_remove(armed[0])
-        dlg.destroy()
         if resp not in (Gtk.ResponseType.ACCEPT, RESP_CUT_DELETE):
+            dlg.destroy()
             return
         self.settings["cut_mode"] = "exact" if use_exact else "copy"
         self._cut = {"doc": doc, "segments": list(segs), "out": out, "exact": use_exact, "proc": None,
                      "cancel": threading.Event(), "expected": total, "delete": resp == RESP_CUT_DELETE}
+        if resp == RESP_CUT_DELETE:
+            # el diálogo sigue abierto mientras dura el corte (se puede cancelar); al empezar el borrado se cierra
+            for w in content_widgets:
+                w.hide()
+            busy = Gtk.Label(label="Cortando %s…" % doc.path.name)
+            busy.set_xalign(0.0)
+            busy.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+            bar = Gtk.ProgressBar()
+            bar.set_show_text(True)
+            box.pack_start(busy, False, False, 0)
+            box.pack_start(bar, False, False, 4)
+            busy.show()
+            bar.show()
+            for rid in (Gtk.ResponseType.ACCEPT, RESP_CUT_DELETE):
+                dlg.get_widget_for_response(rid).hide()
+            dlg.set_default_response(Gtk.ResponseType.CANCEL)
+            dlg.connect("response", lambda d, r: self._cut_cancel())
+            self._cut["dlg"], self._cut["dlg_bar"] = dlg, bar
+        else:
+            dlg.destroy()
         self._cut_pct = None
         self._update_buttons()
         self._refresh_status()
@@ -2912,12 +2958,16 @@ class ThumbSheet(Gtk.Window):
             except OSError:
                 pass
         self.progress.set_text("Cancelando…")
+        if job.get("dlg_bar") is not None:
+            job["dlg_bar"].set_text("Cancelando…")
 
     def _cut_done(self, job, duration, error):
         if self._cut is not job:
             return False
         self._cut = None
         self._cut_pct = None
+        if job.get("dlg") is not None:
+            job["dlg"].destroy()   # terminó el corte: lo que sigue (borrar el original) va en segundo plano
         self._update_buttons()
         self._refresh_status()
         out = job["out"]
@@ -2938,12 +2988,9 @@ class ThumbSheet(Gtk.Window):
                 self._error(txt, "La duración del resultado (%s) no coincide con la esperada (%s): revisa el fichero.%s" % (
                     fmt_time(duration), fmt_time(job["expected"]), " El original se conserva." if job["delete"] else ""))
             elif job["delete"]:
-                err = self._delete_file(job["doc"])
-                if err:
-                    self._error("%s · no se pudo borrar el original" % txt, err)
-                else:
-                    log("cut: original borrado %s" % job["doc"].path.name)
-                    self._flash("%s · original borrado" % txt)
+                self._delete_file(job["doc"], ok_text="%s · original borrado" % txt,
+                                  err_text="%s · no se pudo borrar el original" % txt,
+                                  ok_log="cut: original borrado %s" % job["doc"].path.name)
             else:
                 self._flash(txt)
         return False
@@ -2980,30 +3027,67 @@ class ThumbSheet(Gtk.Window):
         dlg.destroy()
         if resp != Gtk.ResponseType.ACCEPT:
             return
-        err = self._delete_file(doc)
-        if err:
-            self._error("No se pudo eliminar el archivo", err)
-            return
-        self._flash("Eliminado: %s" % doc.path.name)
+        self._delete_file(doc)
 
-    def _delete_file(self, doc):
-        """Borra el vídeo de `doc` del disco (directamente, sin papelera) junto con su caché y lo quita del
-        panel; si era el que estaba a la vista se abre el siguiente de la lista. Devuelve el error o None."""
+    def _delete_file(self, doc, ok_text=None, err_text=None, ok_log=None):
+        """Borra el vídeo de `doc` del disco (directamente, sin papelera) y su caché, en un hilo aparte: el
+        borrado del fichero y de miles de miniaturas puede tardar segundos en un disco lento y no debe
+        congelar la ventana. La fila queda como «Eliminando…» e insensible y, si era el vídeo a la vista, se
+        pasa ya al siguiente. Al terminar sale el toast y la fila desaparece; si falló, vuelve a estar
+        disponible y el toast rojo dice por qué."""
+        if doc.deleting:
+            return
+        doc.deleting = True
+        log("eliminando: %s" % doc.path.name)
         if doc is self.current:
             self.hide_preview()
         if self.generator is not None and self.gen_doc is doc:
             self.generator.cancel()
             self.generator = None
-        try:
-            os.remove(str(doc.path))
-        except OSError as e:
-            return "%s\n%s" % (doc.path, e)
-        if doc.cache_dir:
-            shutil.rmtree(str(doc.cache_dir), ignore_errors=True)
-        self._remove_doc(doc)
+        if doc.row is not None:
+            doc.row.set_sensitive(False)
+            doc.row.sub_label.set_markup("<small>Eliminando…</small>")
+        if doc is self.current:
+            self._show_neighbor(doc)
         if self.generator is None:
             GLib.idle_add(self._start_next_background)
-        return None
+        ok_text = ok_text or ("Eliminado: %s" % doc.path.name)
+        err_text = err_text or "No se pudo eliminar el archivo"
+
+        def work():
+            err = None
+            try:
+                os.remove(str(doc.path))
+            except OSError as e:
+                err = "%s\n%s" % (doc.path, e)
+            if err is None and doc.cache_dir:
+                shutil.rmtree(str(doc.cache_dir), ignore_errors=True)
+            GLib.idle_add(self._delete_done, doc, err, ok_text, err_text, ok_log)
+        # no daemon: si se cierra la app a medias, el borrado confirmado termina igualmente
+        threading.Thread(target=work, name="ts-delete", daemon=False).start()
+
+    def _show_neighbor(self, doc):
+        """Pasa a mostrar el vecino de `doc` (el siguiente, o el último si era el último) sin quitar su fila."""
+        others = [d for d in self.docs if d is not doc and not d.deleting]
+        if not others:
+            self.show_document(None)
+            return
+        idx = self.docs.index(doc)
+        after = [d for d in others if self.docs.index(d) > idx]
+        self.listbox.select_row((after[0] if after else others[-1]).row)
+
+    def _delete_done(self, doc, err, ok_text, err_text, ok_log):
+        doc.deleting = False
+        if err:
+            if doc.row is not None:
+                doc.row.set_sensitive(True)
+                doc.row.sub_label.set_markup("<small>%s</small>" % GLib.markup_escape_text(doc.subtitle))
+            self._error(err_text, err)
+            return False
+        log(ok_log or ("eliminado: %s" % doc.path.name))
+        self._remove_doc(doc)
+        self._flash(ok_text)
+        return False
 
     def _remove_doc(self, doc, show_next=True):
         """Quita `doc` del panel. Si era el que estaba a la vista, abre el siguiente de la lista (o el último si

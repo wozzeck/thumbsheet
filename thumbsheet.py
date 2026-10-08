@@ -1502,13 +1502,49 @@ class Sheet(Gtk.DrawingArea):
             cr.set_source_rgb(0.95, 0.95, 0.95)
             cr.move_to(bx + 4, by + 1)
             PangoCairo.show_layout(cr, layout)
-        # recuadro rojo de selección
+        # recuadro rojo de selección: grueso y sólo por el contorno exterior del grupo (los lados que dan a
+        # otra tesela seleccionada no se pintan)
         if t in self.selected:
-            lw = 4 if w >= 120 else 3
+            lw = 6 if w >= 120 else 4
+            left, right, up, down = self._selected_neighbours(i)
             cr.set_source_rgb(0.93, 0.16, 0.16)
-            cr.set_line_width(lw)
-            cr.rectangle(x + lw / 2.0, y + lw / 2.0, w - lw, h - lw)
-            cr.stroke()
+            if not left:
+                cr.rectangle(x, y, lw, h)
+            if not right:
+                cr.rectangle(x + w - lw, y, lw, h)
+            if not up:
+                cr.rectangle(x, y, w, lw)
+            if not down:
+                cr.rectangle(x, y + h - lw, w, lw)
+            cr.fill()
+
+    def _is_selected(self, j):
+        return 0 <= j < len(self.ts) and self.ts[j] in self.selected
+
+    def _selected_neighbours(self, i):
+        """(izquierda, derecha, arriba, abajo): si la tesela vecina por ese lado está seleccionada."""
+        r, c = divmod(i, self.cols)
+        left = c > 0 and self._is_selected(i - 1)
+        right = c < self.cols - 1 and self._is_selected(i + 1)
+        if self.row_y is None:
+            up = r > 0 and self._is_selected(i - self.cols)
+            down = self._is_selected(i + self.cols)
+        else:
+            up, down = self._covered_by_selected(i, r - 1), self._covered_by_selected(i, r + 1)
+        return left, right, up, down
+
+    def _covered_by_selected(self, i, r2):
+        """Filas de altura propia: ¿el ancho de la tesela i queda cubierto por teselas seleccionadas de la fila r2?"""
+        n = len(self.ts)
+        if r2 < 0 or r2 * self.cols >= n:
+            return False
+        x0, x1 = self.tile_x[i], self.tile_x[i] + self.tile_w[i]
+        cov = 0.0
+        for j in range(r2 * self.cols, min(n, (r2 + 1) * self.cols)):
+            if self.ts[j] in self.selected:
+                a, b = self.tile_x[j], self.tile_x[j] + self.tile_w[j]
+                cov += max(0.0, min(b, x1) - max(a, x0))
+        return cov >= (x1 - x0) - self.GAP - 1.0
 
     @staticmethod
     def _rounded(cr, x, y, w, h, r):

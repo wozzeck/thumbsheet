@@ -11,12 +11,15 @@ thumbsheet vídeo.mp4 [otro.mkv ...]   # o "Abrir con" desde el gestor de archiv
 thumbsheet                            # sin argumentos: diálogo para elegir vídeos
 ```
 
-- **Varios vídeos**: se listan en el panel izquierdo, con una cabecera que dice cuántos hay. Cada fila
-  muestra nombre, duración y resolución, y a la derecha de la segunda línea un icono de mosaico con el
-  estado de sus miniaturas para el intervalo actual: casi invisible si están pendientes, traslúcido
-  mientras se generan, sólido cuando están todas. Clic para ver cada sábana. Se añaden más con `Ctrl+O` o arrastrándolos a la ventana. Cuando el vídeo a la vista
-  termina de generarse, los demás se van generando **en segundo plano** al mismo intervalo, de uno en
-  uno; el vídeo a la vista y los cambios de intervalo tienen siempre prioridad.
+- **Varios vídeos**: se listan en el panel izquierdo, con una cabecera que dice cuántos hay y un botón
+  `+` para añadir más (también `Ctrl+O` o arrastrándolos a la ventana). Cada fila muestra el nombre, el
+  directorio (con `~` por el home) y duración y resolución; los recortes de cada vídeo se guardan junto
+  a su original, estén donde estén. A la derecha de la tercera línea, un icono de cuatro cuadritos
+  indica qué parte de sus miniaturas para el intervalo actual está ya en caché, por cuartos: cada
+  cuadrito sólido son 25 %; los que faltan van traslúcidos mientras se generan y casi invisibles si
+  no. Clic en una fila para ver su sábana. Cuando el vídeo a la vista termina de generarse, los demás
+  se van generando **en segundo plano** al mismo intervalo, de uno en uno; el vídeo a la vista y los
+  cambios de intervalo tienen siempre prioridad.
 - **Orden de generación**: lo que está en pantalla se genera primero, luego lo que viene por delante y al
   final lo que ha quedado atrás al hacer scroll; la cola se reordena con cada movimiento, así que en un
   equipo lento puedes avanzar por la sábana más deprisa de lo que se genera y ver siempre lo que miras.

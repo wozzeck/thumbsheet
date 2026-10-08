@@ -40,6 +40,7 @@ tile() { local r=$1 c=$2; echo "$((X+SX+PAD+c*(CW+GAP)+CW/2)) $((Y+SY+PAD+r*(CH+
 IX=$(gv interval | cut -d, -f1); IY=$(gv interval | cut -d, -f2); TX=$(gv tile | cut -d, -f1); TY=$(gv tile | cut -d, -f2); TW=$(gv tilew)
 LX=$(gv llc | cut -d, -f1); LY=$(gv llc | cut -d, -f2); CX=$(gv cut | cut -d, -f1); CY=$(gv cut | cut -d, -f2); DX=$(gv del | cut -d, -f1); DY=$(gv del | cut -d, -f2)
 ROW1=$(gv rows | cut -d';' -f1); ROW2=$(gv rows | cut -d';' -f2)
+PITCH=$(( ${ROW2#*,} - ${ROW1#*,} )); [[ "$PITCH" -le 50 ]] && ok "fila del panel con tres líneas sin crecer ($PITCH px entre filas, antes 50)" || ko "la fila del panel ha crecido: $PITCH px entre filas"
 SEL="$OUT/cache/thumbsheet"
 S() { grep -o "plan: S=[0-9]*" "$OUT/app.log" | tail -1 | cut -d= -f2; }
 sel() { cat "$SEL"/*/selection.json 2>/dev/null | head -1 || true; }

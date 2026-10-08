@@ -1856,40 +1856,78 @@ def cut_command_exact(video_path, segments, out_path, tmp_path, has_audio):
 # ----------------------------------------------------------------------------------------------
 # documento = un vídeo abierto (sondeo, caché, selección, posición de scroll)
 # ----------------------------------------------------------------------------------------------
+def sub_markup(text):
+    """Líneas secundarias del panel (ruta, duración…): letra pequeña para que quepan tres líneas por fila."""
+    return '<span size="x-small">%s</span>' % GLib.markup_escape_text(text)
+
+
+def short_dir(path):
+    """Directorio del vídeo con el home abreviado a ~."""
+    d, home = str(path.parent), str(HOME)
+    if d == home:
+        return "~"
+    if d.startswith(home + os.sep):
+        return "~" + d[len(home):]
+    return d
+
+
 class StateIcon(Gtk.DrawingArea):
-    """Icono de la segunda línea de cada fila del panel: estado de las miniaturas del vídeo para el intervalo
-    actual. Casi invisible = pendientes, traslúcido = generándose, sólido = todas en caché."""
+    """Icono de cada fila del panel: cuatro cuadritos = cuartos de las miniaturas del vídeo que ya están en
+    caché para el intervalo actual (sólidos); los que faltan van traslúcidos si se está generando y casi
+    invisibles si no. Sólo se repinta cuando cambia de cuarto, no por cada captura."""
     SIZE = 11
-    ALPHA = {None: 0.18, "working": 0.45, "done": 1.0}
-    TIP = {None: "Miniaturas pendientes", "working": "Generando miniaturas…", "done": "Miniaturas generadas"}
-    NAME = {None: "pendientes", "working": "generando", "done": "listas"}
 
     def __init__(self):
         super(StateIcon, self).__init__()
-        self.state = None
+        self.quarters = 0
+        self.working = False
         self.set_size_request(self.SIZE, self.SIZE)
         self.set_valign(Gtk.Align.CENTER)
-        self.set_tooltip_text(self.TIP[None])
+        self.set_tooltip_text(self.describe())
         self.get_style_context().add_class("dim-label")
         self.connect("draw", self.on_draw)
 
-    def set_state(self, state):
-        """Devuelve True si ha cambiado."""
-        if state == self.state:
+    def set_progress(self, done, total, working):
+        """Devuelve True si cambia lo que se ve."""
+        if total <= 0:
+            q = 0
+        elif done >= total:
+            q = 4
+        else:
+            q = min(3, int(4 * done / float(total)))
+        working = bool(working) and q < 4
+        if (q, working) == (self.quarters, self.working):
             return False
-        self.state = state
-        self.set_tooltip_text(self.TIP[state])
+        self.quarters, self.working = q, working
+        self.set_tooltip_text(self.describe())
         self.queue_draw()
         return True
 
+    def describe(self):
+        pct = self.quarters * 25
+        if self.quarters == 4:
+            return "Miniaturas generadas"
+        if self.working:
+            return "Generando miniaturas… (%d %% o más)" % pct
+        return "Miniaturas pendientes" if pct == 0 else "Miniaturas: %d %% o más en caché" % pct
+
+    def state_name(self):
+        pct = self.quarters * 25
+        if self.quarters == 4:
+            return "listas"
+        if self.working:
+            return "generando %d %%" % pct
+        return "pendientes" if pct == 0 else "%d %%" % pct
+
     def on_draw(self, widget, cr):
         c = self.get_style_context().get_color(self.get_state_flags())
-        cr.set_source_rgba(c.red, c.green, c.blue, c.alpha * self.ALPHA[self.state])
         s, g = float(self.SIZE), 1.5
-        q = (s - g) / 2.0   # cuatro cuadritos: un mosaico en miniatura
-        for x, y in ((0, 0), (q + g, 0), (0, q + g), (q + g, q + g)):
+        q = (s - g) / 2.0   # cuatro cuadritos: un mosaico en miniatura, que se va completando por cuartos
+        rest = 0.45 if self.working else 0.18
+        for i, (x, y) in enumerate(((0, 0), (q + g, 0), (0, q + g), (q + g, q + g))):
+            cr.set_source_rgba(c.red, c.green, c.blue, c.alpha * (1.0 if i < self.quarters else rest))
             cr.rectangle(x, y, q, q)
-        cr.fill()
+            cr.fill()
         return False
 
 
@@ -1989,6 +2027,7 @@ class ThumbSheet(Gtk.Window):
         self.current = None
         self.generator = None
         self._tick_id = None                  # refresco periódico del tiempo estimado
+        self._quarter = -1                    # cuarto (0-3) del progreso ya reflejado en el icono de la fila
         self.gen_doc = None                   # vídeo que está generando self.generator (actual o 2.º plano)
         self._cut_pct = None
         self._regen_id = None
@@ -2127,6 +2166,12 @@ class ThumbSheet(Gtk.Window):
         header = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         header.get_style_context().add_class("ts-panel-header")
         header.pack_start(self.count_label, True, True, 0)
+        add_btn = Gtk.Button.new_from_icon_name("list-add-symbolic", Gtk.IconSize.BUTTON)
+        add_btn.set_relief(Gtk.ReliefStyle.NONE)
+        add_btn.set_tooltip_text("Añadir vídeos a la lista (Ctrl+O). Cada recorte se guarda junto a su original.")
+        add_btn.connect("clicked", lambda *_: self.add_paths(choose_videos(self)))
+        header.pack_end(add_btn, False, False, 0)
+        self.listbox.get_style_context().add_class("ts-files")
         panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         panel.set_size_request(140, -1)
         panel.pack_start(header, False, False, 0)
@@ -2229,25 +2274,34 @@ class ThumbSheet(Gtk.Window):
     def _make_row(self, doc):
         row = Gtk.ListBoxRow()
         row.doc = doc
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=1)
+        # tres líneas (nombre, directorio, duración·resolución + icono) en la misma altura que antes tenían
+        # dos: márgenes mínimos y letra pequeña en las secundarias
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
         box.set_margin_start(8)
         box.set_margin_end(8)
-        box.set_margin_top(5)
-        box.set_margin_bottom(5)
+        box.set_margin_top(1)
+        box.set_margin_bottom(1)
         name = Gtk.Label(label=doc.path.name)
         name.set_xalign(0.0)
         name.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         name.set_tooltip_text(str(doc.path))
+        where = Gtk.Label()
+        where.set_xalign(0.0)
+        where.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
+        where.get_style_context().add_class("dim-label")
+        where.set_markup(sub_markup(short_dir(doc.path)))
+        where.set_tooltip_text(str(doc.path.parent))
         sub = Gtk.Label()
         sub.set_xalign(0.0)
         sub.get_style_context().add_class("dim-label")
-        sub.set_markup("<small>%s</small>" % GLib.markup_escape_text(doc.subtitle))
+        sub.set_markup(sub_markup(doc.subtitle))
         state = StateIcon()
-        line2 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-        line2.pack_start(sub, True, True, 0)
-        line2.pack_end(state, False, False, 0)
+        line3 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
+        line3.pack_start(sub, True, True, 0)
+        line3.pack_end(state, False, False, 0)
         box.pack_start(name, False, False, 0)
-        box.pack_start(line2, False, False, 0)
+        box.pack_start(where, False, False, 0)
+        box.pack_start(line3, False, False, 0)
         row.add(box)
         row.sub_label = sub
         row.state = state
@@ -2261,7 +2315,7 @@ class ThumbSheet(Gtk.Window):
 
     def _doc_probed(self, doc):
         if doc.row is not None:
-            doc.row.sub_label.set_markup("<small>%s</small>" % GLib.markup_escape_text(doc.subtitle))
+            doc.row.sub_label.set_markup(sub_markup(doc.subtitle))
         if doc is self.current:
             self._load_current()
         else:
@@ -2329,6 +2383,7 @@ class ThumbSheet(Gtk.Window):
         self.generator = gen
         self.gen_doc = doc
         self._progress = (0, gen.total)
+        self._quarter = -1
         self._refresh_row_states()
         return gen
 
@@ -2384,6 +2439,10 @@ class ThumbSheet(Gtk.Window):
     def on_progress(self, done, total):
         self._progress = (min(done, total), total)
         self._refresh_status()
+        q = int(4 * self._progress[0] / float(total)) if total else 0
+        if q != self._quarter:   # el icono de la fila sólo cambia por cuartos
+            self._quarter = q
+            self._refresh_row_states()
         return False
 
     def on_done(self):
@@ -2405,16 +2464,32 @@ class ThumbSheet(Gtk.Window):
         S = self.current_interval()
         busy = self.generator is not None and not self.generator.finished
         for d in self.docs:
-            if d.row is None:
+            if d.row is None or d.info is None:
                 continue
             if busy and self.gen_doc is d:
-                st = "working"
-            elif d.info is not None and doc_complete(d, S):
-                st = "done"
+                done, total = self._progress
+                working = True
             else:
-                st = None
-            if d.row.state.set_state(st) and DEBUG:
-                log("estado: %s → %s" % (d.path.name, StateIcon.NAME[st]))
+                done, total = self._doc_coverage(d, S)
+                working = False
+            if d.row.state.set_progress(done, total, working) and DEBUG:
+                log("estado: %s → %s" % (d.path.name, d.row.state.state_name()))
+
+    @staticmethod
+    def _doc_coverage(doc, S):
+        """(hechas, total) de las miniaturas del intervalo S que ya están en caché (las imposibles cuentan).
+        Un listdir por vídeo; se llama en los eventos de generación, no por captura."""
+        ts = plan_timestamps(doc.info.duration, S)
+        have = set()
+        try:
+            for name in os.listdir(str(doc.cache_dir)):
+                if name.endswith(".jpg") and name[:-4].isdigit():
+                    have.add(int(name[:-4]))
+                elif name.endswith(".fail") and name[:-5].isdigit():
+                    have.add(int(name[:-5]))
+        except OSError:
+            pass
+        return sum(1 for t in ts if t in have), len(ts)
 
     def _ensure_ticker(self):
         """Mientras hay generación o corte, refresca la barra cada segundo para que la estimación avance
@@ -3046,7 +3121,7 @@ class ThumbSheet(Gtk.Window):
             self.generator = None
         if doc.row is not None:
             doc.row.set_sensitive(False)
-            doc.row.sub_label.set_markup("<small>Eliminando…</small>")
+            doc.row.sub_label.set_markup(sub_markup("Eliminando…"))
         if doc is self.current:
             self._show_neighbor(doc)
         if self.generator is None:
@@ -3081,7 +3156,7 @@ class ThumbSheet(Gtk.Window):
         if err:
             if doc.row is not None:
                 doc.row.set_sensitive(True)
-                doc.row.sub_label.set_markup("<small>%s</small>" % GLib.markup_escape_text(doc.subtitle))
+                doc.row.sub_label.set_markup(sub_markup(doc.subtitle))
             self._error(err_text, err)
             return False
         log(ok_log or ("eliminado: %s" % doc.path.name))
@@ -3295,7 +3370,8 @@ def main(argv):
         .dim-label { opacity: 0.8; }
         .ts-sheet-scroll scrollbar.vertical slider { min-width: 16px; min-height: 56px; border-radius: 10px; }
         .ts-sheet-scroll scrollbar.vertical { background-color: #1c1c1f; border: none; }   /* sin la raya clara de Adwaita */
-        .ts-panel-header { padding: 6px 8px; background-color: alpha(@theme_fg_color, 0.06);
+        .ts-files row { padding: 1px 0; }
+        .ts-panel-header { padding: 1px 2px 1px 8px; background-color: alpha(@theme_fg_color, 0.06);
                            border-bottom: 1px solid alpha(@theme_fg_color, 0.15); }
         scale marks { color: alpha(currentColor, 0.8); }
         progressbar { color: alpha(@theme_fg_color, 0.8); }

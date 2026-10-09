@@ -45,7 +45,8 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   produce se reintenta una a una con seek antes de darlo por imposible, para que una zona dañada no
   arrastre a las teselas sanas de su tramo.
 - **Selección**: clic = alternar una tesela; clic y arrastrar = aplicar a un rango contiguo;
-  `Shift`+clic = seleccionar todo entre la última tesela pulsada y esta; doble clic sobre una
+  `Shift`+clic = seleccionar todo entre la última tesela pulsada y esta (o desde el principio si aún no
+  se había pulsado ninguna); doble clic sobre una
   seleccionada = deseleccionar todo su tramo contiguo; `Ctrl+A` = seleccionar todo el vídeo. Las
   seleccionadas se recuadran en rojo. `Esc` deselecciona todo. Lo que se guarda son **segmentos de
   tiempo**, no teselas: una tesela está marcada si su tramo `[t, t+intervalo)` cae dentro de un
@@ -160,6 +161,12 @@ GStreamer ≥ 1.22 el plugin `va` lo hace solo.)
   tiempo se escriben con la API de texto simple de cairo. Con 16 columnas y miles de teselas, un
   fotograma cuesta unos 5 ms mientras se genera y 2,6 ms en reposo; el estado de la barra se refresca
   como mucho seis veces por segundo y el recuento de caché de cada fila va en un hilo aparte.
+- **Lanzar ffmpeg**: la señal de muerte del padre (si la app muere, mueren sus ffmpeg) se fija con
+  `setpriv --pdeathsig` en vez de con `preexec_fn`, porque con `preexec_fn` Python no puede usar `vfork`
+  y cada lanzamiento es un `fork` completo, 5 ms en un proceso de 180 MB que además bloquea la memoria
+  de todos los hilos mientras dura; con 13 workers arrancando a la vez, o uno por captura en modo
+  *seek*, eran parones de la interfaz que crecían con la memoria de la app. Sin `setpriv` se usa el
+  camino lento. La autoprueba de la GPU se hace una vez por tipo de vídeo y sesión.
 - **Caché en disco** en `~/.cache/thumbsheet/<huella>/<segundo>.jpg` (miniaturas de 480 px de lado
   mayor, ~25 KB). Cambiar el intervalo reutiliza las capturas que coincidan (de 30 s a 10 s, un tercio
   ya está) y volver a abrir el vídeo es instantáneo. La huella es ruta+tamaño+mtime.
@@ -182,6 +189,7 @@ inicialización de VAAPI), por eso sólo se usa en el modo tramos.
 | `THUMBSHEET_AUDIO=0` | reproducir siempre en silencio |
 | `THUMBSHEET_WORKERS=4` | número de ffmpeg en paralelo (por defecto: núcleos físicos − 1, con tope por RAM) |
 | `THUMBSHEET_THUMB_PX=320` | lado mayor de la miniatura guardada (por defecto 480; cambia la huella de caché) |
+| `THUMBSHEET_SWITCH=0.005` | intervalo de cesión del GIL entre hilos en segundos (por defecto 0.002) |
 | `THUMBSHEET_PIX_MB=32` | presupuesto de la caché de miniaturas decodificadas en memoria |
 | `THUMBSHEET_DEBUG=1` | traza en stderr: plan elegido, GPU, tiempos |
 

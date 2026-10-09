@@ -58,7 +58,10 @@ xdotool mousemove $((X+IX)) $((Y+IY)) click 4; sleep 1.5
 S0=$(S); chk "rueda sobre intervalo: 30 s → 1 min (siguiente valor de la lista)" "$S0" "60"
 A=$((COLS*S0)); B=$(((COLS+4)*S0))
 
-# 2. clic = alternar; arrastre = rango contiguo
+# 2. Shift+clic sin tesela previa selecciona desde el principio; luego clic = alternar; arrastre = rango contiguo
+xdotool mousemove $(tile 0 2) keydown shift click 1 keyup shift; sleep 0.5
+chk "Shift+clic recién abierto: 0–$((3*S0)) s" "$(sel)" "$(seg 0 $((3*S0)))"
+xdotool windowfocus --sync "$WID"; xdotool key Escape; sleep 0.4
 xdotool mousemove $(tile 0 1) click 1; shot 2-toggle 1
 xdotool mousemove $(tile 1 0) mousedown 1; sleep 0.1; for c in 1 2 3; do xdotool mousemove $(tile 1 $c); sleep 0.08; done; xdotool mouseup 1; shot 3-arrastre 1
 chk "segmentos = tesela (0,1) → $S0–$((2*S0)) s, fila 1 cols 0-3 → $A–$B s (S=$S0, $COLS columnas)" "$(sel)" "$(seg $S0 $((2*S0)) $A $B)"

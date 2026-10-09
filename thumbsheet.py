@@ -225,7 +225,26 @@ try:
 except OSError:
     _LIBC = None
     PREEXEC = None
-FFMPEG_BASE = NICE + ["ffmpeg", "-nostdin", "-hide_banner"]
+def _pdeathsig_prefix():
+    """Prefijo que fija PR_SET_PDEATHSIG en el hijo (si la app muere, el ffmpeg también) sin recurrir a preexec_fn:
+    con preexec_fn Python no puede usar vfork y cada lanzamiento es un fork completo, 5 ms en un proceso de 180 MB
+    y bloqueando la memoria de todos los hilos mientras dura; con 13 workers arrancando a la vez, o uno por
+    captura en modo seek, eso eran los parones de la interfaz. Con vfork cuesta 0,4 ms y no bloquea nada."""
+    exe = shutil.which("setpriv")
+    if exe:
+        try:
+            out = subprocess.run([exe, "--help"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=5).stdout
+            if b"pdeathsig" in out:
+                return [exe, "--pdeathsig=KILL", "--"]
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return None
+
+
+PDEATH_PREFIX = _pdeathsig_prefix()
+if PDEATH_PREFIX:
+    PREEXEC = None   # con setpriv no hace falta preexec_fn: Python usa vfork
+FFMPEG_BASE = NICE + (PDEATH_PREFIX or []) + ["ffmpeg", "-nostdin", "-hide_banner"]
 FFMPEG = FFMPEG_BASE + ["-loglevel", "error"]
 FFMPEG_INFO = FFMPEG_BASE + ["-loglevel", "info", "-nostats"]   # para leer lo que imprime showinfo
 def _showinfo_filter():
@@ -406,8 +425,17 @@ class Gpu(object):
     def dec_opts(device):
         return ["-hwaccel", "vaapi", "-hwaccel_output_format", "vaapi", "-hwaccel_device", device]
 
+    _tested = {}   # (dispositivo, códec, ancho, alto) -> resultado: una autoprueba por tipo de vídeo y sesión
+
+    @classmethod
+    def selftest(cls, info, device, workdir):
+        key = (device, info.codec, info.width, info.height)
+        if key not in cls._tested:
+            cls._tested[key] = cls._selftest(info, device, workdir)
+        return cls._tested[key]
+
     @staticmethod
-    def selftest(info, device, workdir):
+    def _selftest(info, device, workdir):
         """Decodifica un fotograma por GPU y por CPU y compara: si difieren, la GPU miente (driver
         sin soporte real del perfil, fotogramas verdes...) y no se usa."""
         if info.rotated:   # la autorrotación es un filtro software: incompatible con frames vaapi
@@ -1266,6 +1294,8 @@ class Sheet(Gtk.DrawingArea):
         if i is None:
             return False
         anchor = self._nearest_index(self._anchor_t)
+        if anchor is None and event.state & Gdk.ModifierType.SHIFT_MASK:
+            anchor = 0   # Shift+clic sin tesela previa (vídeo recién abierto): desde el principio
         self._anchor_t = self.ts[i]
         if event.state & Gdk.ModifierType.SHIFT_MASK and anchor is not None:
             # Shift+clic: seleccionar todo entre la última tesela pulsada y esta
@@ -2984,6 +3014,9 @@ class ThumbSheet(Gtk.Window):
         late = now - self._lag[0] - 0.05
         self._lag[0] = now
         self._lag[1] = max(self._lag[1], late)
+        if late > 0.08:
+            snap = ", ".join("%s %d ms" % (k, 1000 * v) for k, v in sorted(_PROF.items(), key=lambda kv: -kv[1])[:4])
+            log("LAG %d ms ahora · %s" % (1000 * late, snap))
         self._lag[2] += 1
         if self._lag[2] >= 40:   # cada ~2 s
             rep = _prof_report()
@@ -3100,12 +3133,22 @@ class ThumbSheet(Gtk.Window):
     def show_document(self, doc):
         if doc is self.current:
             return
+        t0 = time.perf_counter()
+        self._show_document(doc)
+        if DEBUG:
+            log("cambio: %.0f ms en total" % (1000 * (time.perf_counter() - t0)))
+
+    def _show_document(self, doc):
         self.hide_preview()
         if self.current is not None:
             self.current.scroll = self.scroller.get_vadjustment().get_value()
+        t0 = time.perf_counter()
         self._cancel_generator()
+        t1 = time.perf_counter()
         self.current = doc
         self._load_current()
+        if DEBUG:
+            log("cambio: cancelar %.0f ms, cargar %.0f ms" % (1000 * (t1 - t0), 1000 * (time.perf_counter() - t1)))
 
     def _load_current(self):
         doc = self.current
@@ -3118,11 +3161,15 @@ class ThumbSheet(Gtk.Window):
             if doc is None:
                 GLib.idle_add(self._start_next_background)   # sin vídeo a la vista: que siga el resto
             return
+        t0 = time.perf_counter()
         self.sheet.set_video(doc.info.aspect, doc.cache_dir)
+        t1 = time.perf_counter()
         log("vídeo: %s %dx%d %s %.2ffps dur=%s gop=%s miniatura=%dx%d" % (
             doc.path.name, doc.info.width, doc.info.height, doc.info.codec, doc.info.fps,
             fmt_time(doc.info.duration), doc.info.gop, doc.info.thumb_w, doc.info.thumb_h))
         self.regenerate()
+        if DEBUG:
+            log("cambio: set_video %.0f ms, regenerate %.0f ms" % (1000 * (t1 - t0), 1000 * (time.perf_counter() - t1)))
         if doc.scroll:
             GLib.timeout_add(60, self._restore_scroll, doc)
         self._update_buttons()
@@ -3243,16 +3290,23 @@ class ThumbSheet(Gtk.Window):
         for d in self.docs:
             if d.bg_tried != S:
                 d.bg_tried = None   # intervalo nuevo: los demás vuelven a ser candidatos a segundo plano
+        t0 = time.perf_counter()
         gen = self._start_generator(doc, foreground=True)
+        t1 = time.perf_counter()
         center = self.sheet.center_time()   # None si es un vídeo recién abierto (plan vacío)
         self.sheet.set_plan(gen.timestamps)
+        if DEBUG:
+            log("cambio: _start_generator %.0f ms, set_plan %.0f ms" % (1000 * (t1 - t0), 1000 * (time.perf_counter() - t1)))
         # se marcan las teselas que tocan algún segmento; los segmentos guardados no cambian con la rejilla
         self.sheet.set_selected(doc.selection.tiles(gen.timestamps, S, doc.info.duration))
         if center is not None:
             self.sheet.scroll_to_time(center)   # cambio de intervalo: misma zona del vídeo a la vista
         else:
             self.scroller.get_vadjustment().set_value(0)
+        t2 = time.perf_counter()
         gen.start()
+        if DEBUG:
+            log("cambio: gen.start %.0f ms" % (1000 * (time.perf_counter() - t2)))
         self._refresh_status()
         self._update_buttons()
         return False
@@ -3314,7 +3368,11 @@ class ThumbSheet(Gtk.Window):
             return False
 
         def work():   # listdir de cada caché (miles de ficheros) fuera del hilo de la interfaz
+            t0 = time.perf_counter()
             res = [(d, self._doc_coverage(d, S)) for d in docs]
+            if DEBUG:
+                _prof("cobertura(hilo)", time.perf_counter() - t0)
+                _count("cobertura_docs", len(docs))
             GLib.idle_add(apply, res)
         threading.Thread(target=work, name="ts-coverage", daemon=True).start()
 
@@ -4260,6 +4318,9 @@ def choose_videos(parent=None):
 
 
 def main(argv):
+    # los hilos de trabajo casi siempre esperan a ffmpeg: ceder el GIL cada 2 ms en vez de 5 acorta los parones del
+    # hilo de la interfaz cuando alguno hace trabajo Python (medido: bloqueo máximo 141 → 82 ms) sin coste apreciable
+    sys.setswitchinterval(float(os.environ.get("THUMBSHEET_SWITCH", "0.002")))
     GLib.set_prgname(APP)
     GLib.set_application_name(APP)
     Gdk.set_program_class(APP)

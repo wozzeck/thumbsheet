@@ -70,6 +70,31 @@ VIDEO_EXT = (".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".mpg", ".mpeg", "
              ".wmv", ".flv", ".3gp", ".ogv", ".vob")
 
 
+_PROF = {}
+_CNT = {}
+
+
+def _prof(name, dt):
+    _PROF[name] = _PROF.get(name, 0.0) + dt
+
+
+def _count(name, n=1):
+    _CNT[name] = _CNT.get(name, 0) + n
+
+
+def _prof_report():
+    """DEBUG: las funciones que más tiempo han ocupado desde el último informe, y contadores."""
+    if not _PROF and not _CNT:
+        return ""
+    items = sorted(_PROF.items(), key=lambda kv: -kv[1])[:6]
+    rep = ", ".join("%s %d ms" % (k, 1000 * v) for k, v in items)
+    if _CNT:
+        rep += " · " + ", ".join("%s=%d" % kv for kv in sorted(_CNT.items()))
+    _PROF.clear()
+    _CNT.clear()
+    return rep
+
+
 def log(*a):
     if DEBUG:
         print("[%s] %s" % (time.strftime("%H:%M:%S"), " ".join(str(x) for x in a)), file=sys.stderr, flush=True)
@@ -424,10 +449,21 @@ class Gpu(object):
 # ----------------------------------------------------------------------------------------------
 # generación de miniaturas
 # ----------------------------------------------------------------------------------------------
+_PLAN_CACHE = {}
+
+
 def plan_timestamps(duration, interval):
-    """Instantes de captura: 0, S, 2S... sin pasarse del final (la última debe tener medio segundo de margen)."""
-    D = float(duration)
-    return [t for t in range(0, int(math.floor(D)) + 1, int(interval)) if t <= D - 0.5] or [0]
+    """Instantes de captura: 0, S, 2S... sin pasarse del final (la última debe tener medio segundo de margen).
+    Memorizado: se pide muchas veces por segundo y con miles de instantes no es gratis. NO modificar la lista."""
+    key = (float(duration), int(interval))
+    out = _PLAN_CACHE.get(key)
+    if out is None:
+        D = float(duration)
+        out = [t for t in range(0, int(math.floor(D)) + 1, int(interval)) if t <= D - 0.5] or [0]
+        if len(_PLAN_CACHE) > 64:
+            _PLAN_CACHE.clear()
+        _PLAN_CACHE[key] = out
+    return out
 
 
 def doc_complete(doc, interval):
@@ -449,18 +485,20 @@ class Generator(object):
     GPU_WORKERS = 2
 
     def __init__(self, info, cache_dir, interval, on_tile, on_progress, on_done, on_failed=None, focus_fn=None,
-                 on_aspect=None):
+                 on_aspect=None, on_tiles=None):
         self.info = info
         self.cache_dir = cache_dir
         self.S = snap_interval(interval)
         self.on_tile, self.on_progress, self.on_done = on_tile, on_progress, on_done
         self.on_failed = on_failed or (lambda t: False)
         self.on_aspect = on_aspect or (lambda t, a: False)   # on_aspect(t, a): la miniatura t no tiene el aspecto nominal
+        self.on_tiles = on_tiles                              # on_tiles([t…]): las que ya estaban en caché, de golpe
         self.nominal = info.aspect
         self.aspects = {}            # t -> aspecto real de las que difieren del nominal (sidecar aspects.json)
         self._aspects_dirty = 0
         self.focus_fn = focus_fn or (lambda: None)   # () -> (t_lo, t_hi) a la vista, o None (segundo plano)
         self._order_key = None                       # foco con el que se ordenó la cola la última vez
+        self._order_time = 0.0
         self.pending_ts = set()                      # instantes sin resolver: cada uno se cuenta una sola vez
         self.initial_done = 0      # capturas que ya estaban en caché al arrancar (para estimar el ritmo)
         self.eta_logged = False
@@ -486,6 +524,7 @@ class Generator(object):
 
     # --- API ---
     def start(self):
+        t_start = time.perf_counter()
         cached, failed = set(), set()
         try:
             for name in os.listdir(str(self.cache_dir)):
@@ -504,14 +543,22 @@ class Generator(object):
             self.aspects = dict((int(k), float(v)) for k, v in data.items())
         except (OSError, ValueError, TypeError, AttributeError):
             self.aspects = {}
-        for t in self.timestamps:
-            if t in cached:
+        cached_ts = [t for t in self.timestamps if t in cached]
+        if self.on_tiles is not None:
+            self.on_tiles(cached_ts)
+        else:
+            for t in cached_ts:
                 self.on_tile(t)
-                if t in self.aspects:
-                    self.on_aspect(t, self.aspects[t])
-            elif t in failed:
+        for t in cached_ts:
+            if t in self.aspects:
+                self.on_aspect(t, self.aspects[t])
+        for t in self.timestamps:
+            if t in failed:
                 self.on_failed(t)   # ya se intentó y no hay fotograma: no se reintenta
         self._progress()
+        if DEBUG:
+            log("start: %.1f ms en el hilo de la interfaz (%d en caché, %d por hacer)" % (
+                1000 * (time.perf_counter() - t_start), len(cached), len(missing)))
         if not missing:
             self._finish()
             return
@@ -599,9 +646,14 @@ class Generator(object):
             if not self.tasks:
                 return None
             focus = self.focus_fn()
-            if focus != self._order_key:
+            now = time.monotonic()
+            if focus != self._order_key and now - self._order_time >= 0.1:   # en pleno scroll, una vez cada 100 ms
                 self._order_key = focus
+                self._order_time = now
+                t_sort = time.perf_counter()
                 self.tasks.sort(key=lambda tk: self._task_key(tk, focus), reverse=True)   # la mejor al final: pop() O(1)
+                if DEBUG:
+                    _prof("sort(hilo)", time.perf_counter() - t_sort)
                 if DEBUG:
                     first = self.tasks[-1]
                     log("orden: foco=%s primera=%s" % (
@@ -928,11 +980,17 @@ class Generator(object):
 # caché de pixbufs (LRU por bytes) y cargador en segundo plano
 # ----------------------------------------------------------------------------------------------
 class PixCache(object):
+    """Miniaturas decodificadas como superficies cairo (listas para pintar sin convertir), LRU acotada por bytes."""
+
     def __init__(self, budget):
         self.budget = budget
-        self.items = collections.OrderedDict()   # t -> pixbuf
+        self.items = collections.OrderedDict()   # t -> cairo.ImageSurface
         self.bytes = 0
         self.lock = threading.Lock()
+
+    @staticmethod
+    def _size(surface):
+        return surface.get_stride() * surface.get_height()
 
     def get(self, t):
         with self.lock:
@@ -941,17 +999,17 @@ class PixCache(object):
                 self.items.move_to_end(t)
             return pb
 
-    def put(self, t, pb):
-        size = pb.get_byte_length()
+    def put(self, t, surface):
+        size = self._size(surface)
         with self.lock:
             old = self.items.pop(t, None)
             if old is not None:
-                self.bytes -= old.get_byte_length()
-            self.items[t] = pb
+                self.bytes -= self._size(old)
+            self.items[t] = surface
             self.bytes += size
             while self.bytes > self.budget and len(self.items) > 1:
                 _, victim = self.items.popitem(last=False)
-                self.bytes -= victim.get_byte_length()
+                self.bytes -= self._size(victim)
 
     def clear(self):
         with self.lock:
@@ -969,8 +1027,9 @@ class Loader(object):
         self.redraw_fn = redraw_fn
         self.aspect_fn = aspect_fn        # (t, aspecto) si el JPEG no tiene la proporción de su tesela
         self.cv = threading.Condition()
-        self.queue = collections.OrderedDict()   # t -> (path, width)
+        self.queue = collections.OrderedDict()   # t -> (path, width, height)
         self.redraw_pending = False
+        self.loaded = set()                      # cargadas desde el último repintado (sólo se repintan ésas)
         th = threading.Thread(target=self._run, name="ts-loader", daemon=True)
         th.start()
 
@@ -993,16 +1052,21 @@ class Loader(object):
             vis = self.visible_fn()
             if vis is not None and t not in vis:
                 continue
+            t0 = time.perf_counter()
             try:
                 pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(path), width, height, True)
+                surface = Gdk.cairo_surface_create_from_pixbuf(pb, 1, None)   # conversión aquí, no en cada pintado
             except GLib.Error:
                 continue
-            self.cache.put(t, pb)
+            if DEBUG:
+                _prof("loader(hilo)", time.perf_counter() - t0)
+            self.cache.put(t, surface)
             if self.aspect_fn is not None and pb.get_height() > 0 and height > 0:
                 pa, ta = pb.get_width() / float(pb.get_height()), width / float(height)
                 if abs(pa / ta - 1.0) > 0.02:
                     GLib.idle_add(self.aspect_fn, t, pa)   # red de seguridad: el JPEG manda sobre lo apuntado
             with self.cv:
+                self.loaded.add(t)
                 if not self.redraw_pending:
                     self.redraw_pending = True
                     GLib.idle_add(self._redraw)
@@ -1010,7 +1074,8 @@ class Loader(object):
     def _redraw(self):
         with self.cv:
             self.redraw_pending = False
-        self.redraw_fn()
+            loaded, self.loaded = self.loaded, set()
+        self.redraw_fn(loaded)
         return False
 
 
@@ -1021,6 +1086,7 @@ class Sheet(Gtk.DrawingArea):
     GAP = 6
     PAD = 8
     SETTLE_MS = 160
+    LABEL_PX = 12          # "Sans 9" a 96 ppp
 
     def __init__(self):
         super(Sheet, self).__init__()
@@ -1041,6 +1107,7 @@ class Sheet(Gtk.DrawingArea):
         self.tile_x = None
         self.tile_w = None
         self._aspect_relayout_id = None
+        self._draw_stats = [0, 0.0, 0.0, time.time()]   # DEBUG: dibujados, tiempo total, máximo, último informe
         self.vadj = None                      # ajuste vertical del ScrolledWindow (lo pone la ventana)
         self.cache = PixCache(PIX_BUDGET)
         self.visible = (0, -1)
@@ -1048,7 +1115,11 @@ class Sheet(Gtk.DrawingArea):
         self.vis_lock = threading.Lock()
         self.settled = True
         self._settle_id = None
-        self.loader = Loader(self.cache, self._visible_set, self.queue_draw, self.set_aspect)
+        self.loader = Loader(self.cache, self._visible_set, self._tiles_loaded, self.set_aspect)
+        self._buf = None                           # lienzo de imagen para componer cada fotograma (_draw_buffered)
+        self._label_bgs = {}                       # (ancho, alto) -> fondo redondeado de etiqueta ya pintado
+        self._text_adv = {}                        # longitud del texto -> ancho en px (dígitos tabulares)
+        self._font_ext = None
         self.font = Pango.FontDescription("Sans 9")
         self.selected = set()                 # teselas marcadas: vista derivada de los segmentos del documento
         self.on_drag_begin = None             # () -> None            : la ventana guarda una instantánea
@@ -1080,9 +1151,27 @@ class Sheet(Gtk.DrawingArea):
 
     def set_selected(self, selected):
         selected = set(selected)
-        if selected != self.selected:
-            self.selected = selected
+        if selected == self.selected:
+            return
+        changed = selected ^ self.selected
+        self.selected = selected
+        if len(changed) > 200:
             self.queue_draw()
+        else:
+            for t in changed:   # sólo las teselas que cambian
+                i = self.index.get(t)
+                if i is not None:
+                    self._redraw_tile(i)
+
+    def _tiles_loaded(self, loaded):
+        """El cargador ha decodificado estas miniaturas: repintar sólo sus teselas."""
+        if len(loaded) > 150:
+            self.queue_draw()
+            return
+        for t in loaded:
+            i = self.index.get(t)
+            if i is not None:
+                self._redraw_tile(i)
 
     # --- selección: clic = alternar una tesela; clic y arrastrar = aplicar a un rango contiguo ---
     def _row_of_y(self, cy):
@@ -1223,15 +1312,38 @@ class Sheet(Gtk.DrawingArea):
         self._relayout()
 
     def tile_ready(self, t):
-        if t in self.index:
+        """Captura nueva. Si no está a la vista no hay nada que pintar; si lo está, se pide su decodificación y se
+        pinta una sola vez cuando llegue (antes se pintaba el hueco y luego la imagen, para todas las teselas)."""
+        t0 = time.perf_counter()
+        i = self.index.get(t)
+        if i is not None:
             self.ready.add(t)
-            self._redraw_tile(self.index[t])
+            with self.vis_lock:
+                a, b = self.visible
+            if a <= i <= b:
+                x, y, w, h = self._tile_rect(i)
+                if self.cache.get(t) is None:
+                    self.loader.request(t, self.cache_dir / ("%d.jpg" % t), w, h)
+                else:
+                    self.queue_draw_area(x, y, w, h)
+        if DEBUG:
+            _prof("tile_ready", time.perf_counter() - t0)
+        return False
+
+    def tiles_ready(self, ts):
+        """Muchas de golpe (las que ya estaban en caché al arrancar): un solo repintado."""
+        self.ready.update(t for t in ts if t in self.index)
+        self.queue_draw()
         return False
 
     def tile_failed(self, t):
-        if t in self.index:
+        i = self.index.get(t)
+        if i is not None:
             self.failed.add(t)
-            self._redraw_tile(self.index[t])
+            with self.vis_lock:
+                a, b = self.visible
+            if a <= i <= b:
+                self._redraw_tile(i)
         return False
 
     # --- posición de lectura: la tesela del centro del visor sigue en el centro al recomponer ---
@@ -1366,6 +1478,32 @@ class Sheet(Gtk.DrawingArea):
         if changed:
             self.queue_draw()
 
+    def _tiles_in_rect(self, x1, y1, x2, y2):
+        """Índices de las teselas que tocan el rectángulo (coordenadas del mosaico)."""
+        n = len(self.ts)
+        if not n:
+            return ()
+        r0 = max(0, self._row_of_y(y1 - self.PAD))
+        r1 = self._row_of_y(y2 - self.PAD)
+        if self.row_y is None:
+            pitch = self.cell_w + self.GAP
+            c0 = max(0, int((x1 - self.PAD) // pitch))
+            c1 = min(self.cols - 1, int((x2 - self.PAD) // pitch))
+            out = []
+            for r in range(r0, r1 + 1):
+                base = r * self.cols
+                for c in range(c0, c1 + 1):
+                    if base + c < n:
+                        out.append(base + c)
+            return out
+        out = []
+        for r in range(r0, min(r1, len(self.row_y) - 1) + 1):
+            for i in range(r * self.cols, min(n, (r + 1) * self.cols)):
+                tx = self.PAD + self.tile_x[i]
+                if tx < x2 and tx + self.tile_w[i] > x1:
+                    out.append(i)
+        return out
+
     def _tile_rect(self, i):
         r, c = divmod(i, self.cols)
         if self.row_y is None or i >= len(self.tile_x):
@@ -1401,6 +1539,46 @@ class Sheet(Gtk.DrawingArea):
 
     # --- dibujo ---
     def on_draw(self, widget, cr):
+        if DEBUG:
+            t0 = time.perf_counter()
+            self._draw_buffered(cr)
+            dt = time.perf_counter() - t0
+            _prof("draw", dt)
+            st = self._draw_stats
+            st[0] += 1
+            st[1] += dt
+            st[2] = max(st[2], dt)
+            now = time.time()
+            if now - st[3] >= 2.0 and st[0]:
+                log("draw: %d dibujados, media %.1f ms, máximo %.1f ms" % (st[0], 1000 * st[1] / st[0], 1000 * st[2]))
+                self._draw_stats = [0, 0.0, 0.0, now]
+            return False
+        return self._draw_buffered(cr)
+
+    def _draw_buffered(self, cr):
+        """Compone el fotograma en un lienzo de imagen en memoria (operaciones de microsegundos) y lo sube al
+        servidor gráfico de una vez. Pintando directamente sobre la superficie de la ventana, cada miniatura y
+        cada etiqueta eran una subida aparte: con cientos de teselas a la vista, decenas de milisegundos."""
+        x1, y1, x2, y2 = cr.clip_extents()
+        ox, oy = int(math.floor(x1)), int(math.floor(y1))
+        w, h = int(math.ceil(x2)) - ox, int(math.ceil(y2)) - oy
+        if w <= 0 or h <= 0:
+            return False
+        buf = self._buf
+        if buf is None or buf.get_width() < w or buf.get_height() < h:
+            buf = self._buf = cairo.ImageSurface(cairo.FORMAT_RGB24, max(w, 64), max(h, 64))
+        c = cairo.Context(buf)
+        c.translate(-ox, -oy)
+        for rc in cr.copy_clip_rectangle_list():   # mismo recorte, para que sólo se compongan las teselas sucias
+            c.rectangle(rc.x, rc.y, rc.width, rc.height)
+        c.clip()
+        self._draw_frame(c)
+        cr.set_source_surface(buf, ox, oy)
+        cr.get_source().set_filter(cairo.FILTER_NEAREST)
+        cr.paint()
+        return False
+
+    def _draw_frame(self, cr):
         x1, y1, x2, y2 = cr.clip_extents()
         cr.set_source_rgb(0.11, 0.11, 0.12)
         cr.paint()
@@ -1427,10 +1605,30 @@ class Sheet(Gtk.DrawingArea):
         with self.vis_lock:
             self.visible = (max(0, i0 - margin), min(len(self.ts) - 1, i1 + margin))
             self.visible_core = core
-        layout = PangoCairo.create_layout(cr)
-        layout.set_font_description(self.font)
-        for i in range(i0, i1 + 1):
-            self._draw_tile(cr, layout, i)
+        # sólo las teselas que tocan los rectángulos sucios de verdad: mientras se genera, las nuevas caen
+        # repartidas por la pantalla y la caja envolvente del recorte abarcaba toda la zona visible
+        rects = cr.copy_clip_rectangle_list()   # lista de cairo.Rectangle (x, y, width, height)
+        if 1 < len(rects) <= 1024:
+            todo = set()
+            for rc in rects:
+                todo.update(self._tiles_in_rect(rc.x, rc.y, rc.x + rc.width, rc.y + rc.height))
+            if DEBUG:
+                _count("rects", len(rects))
+                _count("teselas", len(todo))
+                _count("dibujos")
+            labels = []
+            for i in sorted(todo):
+                if i0 <= i <= i1:
+                    self._draw_tile(cr, i, labels)
+        else:
+            if DEBUG:
+                _count("rects", len(rects))
+                _count("teselas", i1 + 1 - i0)
+                _count("dibujos_completos")
+            labels = []
+            for i in range(i0, i1 + 1):
+                self._draw_tile(cr, i, labels)
+        self._draw_labels(cr, labels)
         # prefetch fuera de pantalla (sin dibujar)
         for i in list(range(max(0, i0 - margin), i0)) + list(range(i1 + 1, min(len(self.ts), i1 + 1 + margin))):
             t = self.ts[i]
@@ -1439,10 +1637,14 @@ class Sheet(Gtk.DrawingArea):
                 self.loader.request(t, self.cache_dir / ("%d.jpg" % t), pw, ph)
         return False
 
-    def _draw_tile(self, cr, layout, i):
+    def _draw_tile(self, cr, i, labels):
         t = self.ts[i]
         x, y, w, h = self._tile_rect(i)
+        t0 = time.perf_counter()
         pb = self.cache.get(t) if t in self.ready else None
+        if DEBUG:
+            _prof("dt_cache", time.perf_counter() - t0)
+            t0 = time.perf_counter()
         if pb is None:
             cr.set_source_rgb(0.18, 0.18, 0.2)
             cr.rectangle(x, y, w, h)
@@ -1461,6 +1663,9 @@ class Sheet(Gtk.DrawingArea):
                 cr.stroke()
             elif t in self.ready:
                 self.loader.request(t, self.cache_dir / ("%d.jpg" % t), w, h)
+            if DEBUG:
+                _prof("dt_hueco", time.perf_counter() - t0)
+                t0 = time.perf_counter()
         else:
             pw, ph = pb.get_width(), pb.get_height()
             if (abs(pw - w) > 1 or abs(ph - h) > 1) and self.settled:
@@ -1470,7 +1675,7 @@ class Sheet(Gtk.DrawingArea):
                 cr.save()
                 cr.rectangle(x, y, w, h)
                 cr.clip()
-                Gdk.cairo_set_source_pixbuf(cr, pb, x, y)
+                cr.set_source_surface(pb, x, y)
                 cr.get_source().set_filter(cairo.FILTER_FAST)
                 cr.paint()
                 cr.restore()
@@ -1486,22 +1691,16 @@ class Sheet(Gtk.DrawingArea):
                 cr.save()
                 cr.translate(dx, dy)
                 cr.scale(s, s)
-                Gdk.cairo_set_source_pixbuf(cr, pb, 0, 0)
+                cr.set_source_surface(pb, 0, 0)
                 cr.get_source().set_filter(cairo.FILTER_BILINEAR)
                 cr.rectangle(0, 0, pw, ph)
                 cr.fill()
                 cr.restore()
-        # etiqueta de tiempo
+            if DEBUG:
+                _prof("dt_imagen", time.perf_counter() - t0)
+                t0 = time.perf_counter()
         if w >= 56:
-            layout.set_text(fmt_time(t), -1)
-            tw, th = layout.get_pixel_size()
-            bx, by = x + 4, y + h - th - 6
-            cr.set_source_rgba(0, 0, 0, 0.6)
-            self._rounded(cr, bx, by, tw + 8, th + 2, 3)
-            cr.fill()
-            cr.set_source_rgb(0.95, 0.95, 0.95)
-            cr.move_to(bx + 4, by + 1)
-            PangoCairo.show_layout(cr, layout)
+            labels.append((x, y, h, t))   # las etiquetas de tiempo se pintan en lote al final (ver _draw_labels)
         # recuadro rojo de selección, grueso, en los cuatro lados de cada tesela
         if t in self.selected:
             lw = 6 if w >= 120 else 4
@@ -1509,6 +1708,50 @@ class Sheet(Gtk.DrawingArea):
             cr.set_line_width(lw)
             cr.rectangle(x + lw / 2.0, y + lw / 2.0, w - lw, h - lw)
             cr.stroke()
+
+    def _draw_labels(self, cr, labels):
+        """Etiquetas de tiempo de las teselas pintadas, en lote y con la API de texto simple de cairo (glifos en
+        la caché interna de cairo): Pango por etiqueta costaba 0,5 ms y era el 85 % del dibujado. El fondo
+        redondeado es una superficie por ancho de texto."""
+        if not labels:
+            return
+        t0 = time.perf_counter()
+        cr.save()
+        cr.select_font_face("Sans", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
+        cr.set_font_size(self.LABEL_PX)
+        if self._font_ext is None:
+            self._font_ext = cr.font_extents()   # (ascent, descent, height, …)
+        asc, desc, fh = self._font_ext[0], self._font_ext[1], self._font_ext[2]
+        th = int(math.ceil(fh))
+        items = []
+        for x, y, h, t in labels:
+            text = fmt_time(t)
+            tw = self._text_adv.get(len(text))
+            if tw is None:   # dígitos tabulares: el ancho depende sólo de la longitud
+                tw = int(math.ceil(cr.text_extents(text).x_advance))
+                self._text_adv[len(text)] = tw
+            bx, by = x + 4, y + h - th - 6
+            cr.set_source_surface(self._label_bg(tw + 8, th + 2), bx, by)
+            cr.paint()
+            items.append((bx + 4, by + 1 + asc, text))
+        cr.set_source_rgb(0.95, 0.95, 0.95)
+        for tx, ty, text in items:
+            cr.move_to(tx, ty)
+            cr.show_text(text)
+        cr.restore()
+        if DEBUG:
+            _prof("dt_etiqueta", time.perf_counter() - t0)
+
+    def _label_bg(self, w, h):
+        surf = self._label_bgs.get((w, h))
+        if surf is None:
+            surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, w, h)
+            c = cairo.Context(surf)
+            c.set_source_rgba(0, 0, 0, 0.6)
+            self._rounded(c, 0, 0, w, h, 3)
+            c.fill()
+            self._label_bgs[(w, h)] = surf
+        return surf
 
     @staticmethod
     def _rounded(cr, x, y, w, h, r):
@@ -1957,14 +2200,19 @@ class Selection(object):
         return float(t), min(float(t + interval), float(duration))
 
     def tiles(self, timestamps, interval, duration):
-        """Teselas marcadas para esta rejilla."""
+        """Teselas marcadas para esta rejilla. Instantes y tramos están ordenados: una sola pasada."""
         out = set()
+        segs = self.segments
+        if not segs:
+            return out
+        j, m, S, D = 0, len(segs), float(interval), float(duration)
         for t in timestamps:
-            a, b = self.tile_range(t, interval, duration)
-            for x, y in self.segments:
-                if x < b and y > a:
-                    out.add(t)
-                    break
+            a = float(t)
+            b = min(a + S, D)
+            while j < m and segs[j][1] <= a:
+                j += 1
+            if j < m and segs[j][0] < b:
+                out.add(t)
         return out
 
     def to_json(self):
@@ -2245,6 +2493,10 @@ class SegPanel(Gtk.Box):
             self.refresh(*self._params, force=True)
         return False
 
+    def tiles_ready(self, ts):
+        if self._wanted and self._params is not None and self._wanted.intersection(ts):
+            self.refresh(*self._params, force=True)
+
     def _rebuild(self):
         self._id = None
         doc, segs, ts, S, dur = self._params if self._params else (None, [], [], 1, 0.0)
@@ -2473,6 +2725,9 @@ class ThumbSheet(Gtk.Window):
         self.current = None
         self.generator = None
         self._tick_id = None                  # refresco periódico del tiempo estimado
+        self._status_id = None                # refresco agrupado del estado (llega por captura)
+        self._coverage_busy = False           # recuento de caché de las filas en marcha (hilo aparte)
+        self._coverage_again = False
         self._quarter = -1                    # cuarto (0-3) del progreso ya reflejado en el icono de la fila
         self.gen_doc = None                   # vídeo que está generando self.generator (actual o 2.º plano)
         self._cut_pct = None
@@ -2684,6 +2939,25 @@ class ThumbSheet(Gtk.Window):
         self.add_paths(video_paths)
         if DEBUG:
             GLib.timeout_add(1500, self._log_geometry)
+            self._lag = [time.perf_counter(), 0.0, 0]   # último tic, retraso máximo, tics
+            GLib.timeout_add(50, self._lag_tick)
+
+    def _lag_tick(self):
+        """DEBUG: cuánto llega tarde un temporizador de 50 ms = cuánto estuvo bloqueado el hilo de la interfaz."""
+        now = time.perf_counter()
+        late = now - self._lag[0] - 0.05
+        self._lag[0] = now
+        self._lag[1] = max(self._lag[1], late)
+        self._lag[2] += 1
+        if self._lag[2] >= 40:   # cada ~2 s
+            rep = _prof_report()
+            if self._lag[1] > 0.03:
+                log("lag: hilo de la interfaz bloqueado hasta %d ms · %s" % (1000 * self._lag[1], rep))
+            elif rep:
+                log("ui: %s" % rep)
+            self._lag[1] = 0.0
+            self._lag[2] = 0
+        return True
 
     def _log_geometry(self):
         """Sólo con THUMBSHEET_DEBUG=1: coordenadas (relativas a la ventana) que usa el harness de pruebas."""
@@ -2833,7 +3107,12 @@ class ThumbSheet(Gtk.Window):
             self.sheet.tile_ready(t)
             self.segpanel.tile_ready(t)
             return False
+
+        def fg_tiles(ts):
+            self.sheet.tiles_ready(ts)
+            self.segpanel.tiles_ready(ts)
         on_tile = fg_tile if foreground else (lambda t: False)
+        on_tiles = fg_tiles if foreground else (lambda ts: None)
         on_failed = self.sheet.tile_failed if foreground else (lambda t: False)
         on_aspect = self.sheet.set_aspect if foreground else (lambda t, a: False)
         gen = Generator(doc.info, doc.cache_dir, S,
@@ -2842,7 +3121,8 @@ class ThumbSheet(Gtk.Window):
                         lambda: self.on_done() if current() else False,
                         lambda t: on_failed(t) if current() else False,
                         focus_fn=self.sheet.focus_range if foreground else None,
-                        on_aspect=lambda t, a: on_aspect(t, a) if current() else False)
+                        on_aspect=lambda t, a: on_aspect(t, a) if current() else False,
+                        on_tiles=lambda ts: on_tiles(ts) if current() else None)
         holder.append(gen)
         self.generator = gen
         self.gen_doc = doc
@@ -2943,8 +3223,11 @@ class ThumbSheet(Gtk.Window):
 
     # ---- callbacks de generación ---------------------------------------------------------------
     def on_progress(self, done, total):
+        t0 = time.perf_counter()
         self._progress = (min(done, total), total)
         self._refresh_status()
+        if DEBUG:
+            _prof("on_progress", time.perf_counter() - t0)
         q = int(4 * self._progress[0] / float(total)) if total else 0
         if q != self._quarter:   # el icono de la fila sólo cambia por cuartos
             self._quarter = q
@@ -2969,17 +3252,35 @@ class ThumbSheet(Gtk.Window):
         en segundo plano), sólido cuando están todas para el intervalo actual, casi invisible si pendientes."""
         S = self.current_interval()
         busy = self.generator is not None and not self.generator.finished
-        for d in self.docs:
-            if d.row is None or d.info is None:
-                continue
-            if busy and self.gen_doc is d:
-                done, total = self._progress
-                working = True
-            else:
-                done, total = self._doc_coverage(d, S)
-                working = False
-            if d.row.state.set_progress(done, total, working) and DEBUG:
-                log("estado: %s → %s" % (d.path.name, d.row.state.state_name()))
+        gen_doc = self.gen_doc if busy else None
+        if gen_doc is not None and gen_doc.row is not None:
+            done, total = self._progress
+            if gen_doc.row.state.set_progress(done, total, True) and DEBUG:
+                log("estado: %s → %s" % (gen_doc.path.name, gen_doc.row.state.state_name()))
+        docs = [d for d in self.docs if d.row is not None and d.info is not None and d is not gen_doc]
+        if not docs:
+            return
+        if self._coverage_busy:
+            self._coverage_again = True
+            return
+        self._coverage_busy = True
+
+        def apply(res):
+            self._coverage_busy = False
+            for d, (done, total) in res:
+                if d.row is None or (self.generator is not None and not self.generator.finished and self.gen_doc is d):
+                    continue
+                if d.row.state.set_progress(done, total, False) and DEBUG:
+                    log("estado: %s → %s" % (d.path.name, d.row.state.state_name()))
+            if self._coverage_again:
+                self._coverage_again = False
+                self._refresh_row_states()
+            return False
+
+        def work():   # listdir de cada caché (miles de ficheros) fuera del hilo de la interfaz
+            res = [(d, self._doc_coverage(d, S)) for d in docs]
+            GLib.idle_add(apply, res)
+        threading.Thread(target=work, name="ts-coverage", daemon=True).start()
 
     @staticmethod
     def _doc_coverage(doc, S):
@@ -3011,6 +3312,20 @@ class ThumbSheet(Gtk.Window):
         return True
 
     def _refresh_status(self):
+        """Agrupa las peticiones (llegan por cada captura): como mucho seis refrescos por segundo."""
+        if self._status_id is None:
+            self._status_id = GLib.timeout_add(160, self._refresh_status_now)
+
+    def _refresh_status_now(self):
+        t0 = time.perf_counter()
+        try:
+            return self._refresh_status_impl()
+        finally:
+            if DEBUG:
+                _prof("status", time.perf_counter() - t0)
+
+    def _refresh_status_impl(self):
+        self._status_id = None
         doc = self.current
         if doc is None:
             base = "Sin vídeos · Ctrl+O o arrastra aquí" if not self.docs else ""
@@ -3082,6 +3397,7 @@ class ThumbSheet(Gtk.Window):
 
     def on_drag_begin(self):
         self._sel_snapshot = self.current.selection.copy() if self.current else None
+        self._snap_tiles = set(self.sheet.selected)   # lo marcado al empezar: cada movimiento sólo suma o resta el rango
 
     def on_drag_apply(self, timestamps, mode):
         doc = self.current
@@ -3096,7 +3412,8 @@ class ThumbSheet(Gtk.Window):
             else:
                 sel.remove(a, b)
         doc.selection = sel
-        self.sheet.set_selected(sel.tiles(ts_all, S, dur))
+        drag = set(timestamps)
+        self.sheet.set_selected((self._snap_tiles | drag) if mode else (self._snap_tiles - drag))
 
     def on_drag_end(self):
         self._sel_snapshot = None
@@ -3165,7 +3482,7 @@ class ThumbSheet(Gtk.Window):
             return
         self._preview_key = (doc, t)
         self._pause_background()
-        pb = self.sheet.cache.get(t)
+        pb = None   # la caché del mosaico guarda superficies cairo; la vista ampliada carga el JPEG (es uno)
         thumb = doc.cache_dir / ("%d.jpg" % t)
         if pb is None and thumb.exists():
             try:

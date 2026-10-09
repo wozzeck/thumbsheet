@@ -153,6 +153,13 @@ GStreamer ≥ 1.22 el plugin `va` lo hace solo.)
     fotograma GPU/CPU (si el driver miente, se descarta sin ruido).
 - Decodificador software con `-skip_frame noref -skip_loop_filter all`: sin B-frames ni desbloqueo,
   invisible a tamaño de miniatura y un 20–30 % más barato.
+- **Dibujado del mosaico**: cada fotograma se compone en un lienzo de imagen en memoria y se sube al
+  servidor gráfico de una vez; sólo se repintan las teselas que cambian (las recién decodificadas, las
+  que cambian de selección), y una captura nueva no se pinta hasta que su miniatura está decodificada,
+  y sólo si está a la vista. Las miniaturas se guardan ya como superficies cairo y las etiquetas de
+  tiempo se escriben con la API de texto simple de cairo. Con 16 columnas y miles de teselas, un
+  fotograma cuesta unos 5 ms mientras se genera y 2,6 ms en reposo; el estado de la barra se refresca
+  como mucho seis veces por segundo y el recuento de caché de cada fila va en un hilo aparte.
 - **Caché en disco** en `~/.cache/thumbsheet/<huella>/<segundo>.jpg` (miniaturas de 480 px de lado
   mayor, ~25 KB). Cambiar el intervalo reutiliza las capturas que coincidan (de 30 s a 10 s, un tercio
   ya está) y volver a abrir el vídeo es instantáneo. La huella es ruta+tamaño+mtime.

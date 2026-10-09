@@ -1826,6 +1826,31 @@ class Preview(Gtk.DrawingArea):
         return False
 
 
+_GST_LOCK = threading.Lock()
+
+
+def gst_warmup():
+    """Carga GStreamer y los plugins del reproductor en un hilo aparte. Crear el primer reproductor costaba
+    ~0,7 s en el hilo de la interfaz (registro + carga de playbin, gtksink y lo que arrastran); con los plugins
+    ya en memoria, crearlo cuesta milisegundos. El gtksink no se instancia aquí: su widget es de GTK."""
+    global _GST_READY
+    if not HAVE_GST:
+        return
+    t0 = time.perf_counter()
+    with _GST_LOCK:
+        if not _GST_READY:
+            Gst.init(None)
+            _GST_READY = True
+    try:
+        Gst.ElementFactory.make("playbin", None)
+        for name in ("gtk", "playback", "libav", "videoconvertscale", "videoconvert", "audioconvert"):
+            Gst.Plugin.load_by_name(name)
+    except Exception as e:  # noqa: BLE001
+        log("gst: precarga fallida", e)
+    if DEBUG:
+        log("gst: precarga en %.0f ms (hilo aparte)" % (1000 * (time.perf_counter() - t0)))
+
+
 class Player(object):
     """playbin + gtksink embebido en la capa de la vista ampliada. Los avisos del bus llegan en el hilo GTK
     (add_signal_watch) y se reparten por callbacks: on_state(playing), on_eos(), on_error(mensaje)."""
@@ -1836,9 +1861,10 @@ class Player(object):
         global _GST_READY
         if not HAVE_GST:
             raise RuntimeError("GStreamer no disponible")
-        if not _GST_READY:
-            Gst.init(None)
-            _GST_READY = True
+        with _GST_LOCK:
+            if not _GST_READY:
+                Gst.init(None)
+                _GST_READY = True
         self.playbin = Gst.ElementFactory.make("playbin", None)
         sink = Gst.ElementFactory.make("gtksink", None)
         if self.playbin is None or sink is None:
@@ -1862,13 +1888,17 @@ class Player(object):
         self.playbin.set_property("flags", self.playbin.get_property("flags") & ~self.FLAG_AUDIO)
 
     def load(self, path, start_s, play):
+        t0 = time.perf_counter()
         self.playbin.set_state(Gst.State.NULL)
+        t1 = time.perf_counter()
         self.playbin.set_property("uri", pathlib.Path(path).as_uri())
         self.loaded_path = pathlib.Path(path)
         self.want_play = play
         self._pending = (start_s, play)
         self._prerolled = False
         self.playbin.set_state(Gst.State.PAUSED)
+        if DEBUG:
+            log("player: load: NULL %.0f ms, PAUSED %.0f ms" % (1000 * (t1 - t0), 1000 * (time.perf_counter() - t1)))
 
     def _on_message(self, bus, msg):
         t = msg.type
@@ -1877,10 +1907,14 @@ class Player(object):
                 self._prerolled = True
                 start_s, play = self._pending or (None, False)
                 self._pending = None
+                t0 = time.perf_counter()
                 if start_s is not None:
                     self.seek(start_s)
+                t1 = time.perf_counter()
                 if play:
                     self.playbin.set_state(Gst.State.PLAYING)
+                if DEBUG:
+                    log("player: preroll: seek %.0f ms, PLAYING %.0f ms" % (1000 * (t1 - t0), 1000 * (time.perf_counter() - t1)))
         elif t == Gst.MessageType.STATE_CHANGED and msg.src is self.playbin:
             _old, new, _pending = msg.parse_state_changed()
             if self.on_state:
@@ -2937,6 +2971,8 @@ class ThumbSheet(Gtk.Window):
         self.show_all()
         self._load_current()
         self.add_paths(video_paths)
+        self._gst_warm = False
+        GLib.timeout_add(2500, self._warm_gst)   # con la ventana ya en marcha, precargar el reproductor aparte
         if DEBUG:
             GLib.timeout_add(1500, self._log_geometry)
             self._lag = [time.perf_counter(), 0.0, 0]   # último tic, retraso máximo, tics
@@ -3482,6 +3518,7 @@ class ThumbSheet(Gtk.Window):
             return
         self._preview_key = (doc, t)
         self._pause_background()
+        self._warm_gst()   # si aún no se ha precargado, ahora: lo normal es que play llegue después
         pb = None   # la caché del mosaico guarda superficies cairo; la vista ampliada carga el JPEG (es uno)
         thumb = doc.cache_dir / ("%d.jpg" % t)
         if pb is None and thumb.exists():
@@ -3585,19 +3622,29 @@ class ThumbSheet(Gtk.Window):
             GLib.idle_add(self._start_next_background)
 
     # ---- reproducción (GStreamer) dentro de la vista ampliada -----------------------------------
+    def _warm_gst(self):
+        if not self._gst_warm and self.player is None:
+            self._gst_warm = True
+            threading.Thread(target=gst_warmup, name="ts-gst", daemon=True).start()
+        return False
+
     def _ensure_player(self):
         if self.player is not None:
             return self.player
         if not HAVE_GST:
             self._flash("Sin GStreamer: sudo apt install gir1.2-gstreamer-1.0 gstreamer1.0-gtk3 gstreamer1.0-libav")
             return None
+        t0 = time.perf_counter()
         try:
             audio = os.environ.get("THUMBSHEET_AUDIO", "1") not in ("0", "off", "no")
             self.player = Player(audio=audio)
         except RuntimeError as e:
             self._flash(str(e))
             return None
+        t1 = time.perf_counter()
         self.layer.attach_video(self.player.widget)
+        if DEBUG:
+            log("player: crear %.0f ms, incrustar %.0f ms" % (1000 * (t1 - t0), 1000 * (time.perf_counter() - t1)))
         self.player.on_state = self._on_player_state
         self.player.on_eos = self._on_player_eos
         self.player.on_error = self._on_player_error

@@ -1895,8 +1895,9 @@ class Selection(object):
     10–30), pero el segmento sigue siendo 15–25 y al volver a 5 s recupera sus bordes. Marcar o desmarcar
     una tesela suma o resta su tramo [t, t+S) a los segmentos."""
 
-    def __init__(self, segments=None):
+    def __init__(self, segments=None, order=None):
         self.segments = self._normalize(segments or [])
+        self.order = [float(k) for k in (order or [])]   # orden de corte: instante de inicio de cada tramo
 
     @staticmethod
     def _normalize(segs):
@@ -1911,7 +1912,25 @@ class Selection(object):
         return out
 
     def copy(self):
-        return Selection(list(self.segments))
+        return Selection(list(self.segments), list(self.order))
+
+    def ordered(self):
+        """Tramos en el orden de corte: primero los que tienen posición asignada (identificados por el instante
+        de inicio con que se ordenaron), después los demás por tiempo. Las posiciones sobreviven a los retoques:
+        un tramo que crece o se funde con otro sigue conteniendo su instante; uno borrado desaparece sin más."""
+        segs = list(self.segments)
+        out, used = [], set()
+        for key in self.order:
+            for i, (a, b) in enumerate(segs):
+                if i not in used and a <= key < b:
+                    out.append((a, b))
+                    used.add(i)
+                    break
+        out.extend(s for i, s in enumerate(segs) if i not in used)
+        return out
+
+    def set_order(self, segs):
+        self.order = [float(a) for a, _b in segs]
 
     def __bool__(self):
         return bool(self.segments)
@@ -1949,12 +1968,16 @@ class Selection(object):
         return out
 
     def to_json(self):
-        return {"segments": [[_num(a), _num(b)] for a, b in self.segments]}
+        d = {"segments": [[_num(a), _num(b)] for a, b in self.segments]}
+        ordered = self.ordered()
+        if ordered != self.segments:
+            d["order"] = [_num(a) for a, _b in ordered]
+        return d
 
     @classmethod
     def from_json(cls, data):
         if isinstance(data, dict):
-            return cls([(a, b) for a, b in data.get("segments") or []])
+            return cls([(a, b) for a, b in data.get("segments") or []], data.get("order") or [])
         if isinstance(data, list):   # formato antiguo: lista de teselas sueltas; se asumen tramos de 5 s
             return cls([(t, t + 5) for t in data])
         return cls()
@@ -2175,6 +2198,185 @@ class StateIcon(Gtk.DrawingArea):
         return False
 
 
+class SegPanel(Gtk.Box):
+    """Panel derecho (plegable): los tramos seleccionados en su orden de corte, cada uno con su primer y último
+    fotograma, inicio y duración. Arrastrar por el asa reordena (el orden lo usan Cortar y LLC); × quita el tramo;
+    clic en la tarjeta lleva el mosaico a ese instante. Cabecera: cuántos hay y la duración total. Sólo se
+    reconstruye cuando cambian los tramos (agrupando lo que llegue en 120 ms) y las miniaturas se decodifican una
+    vez a tamaño de tarjeta."""
+    THUMB_H = 44
+    WIDTH = 280
+    TARGETS = [Gtk.TargetEntry.new("THUMBSHEET_SEGMENT", Gtk.TargetFlags.SAME_APP, 0)]
+
+    def __init__(self, on_reorder, on_delete, on_goto):
+        super(SegPanel, self).__init__(orientation=Gtk.Orientation.VERTICAL)
+        self.on_reorder, self.on_delete, self.on_goto = on_reorder, on_delete, on_goto
+        self.set_size_request(self.WIDTH, -1)
+        self.header = Gtk.Label(label="Sin segmentos")
+        self.header.set_xalign(0.0)
+        hb = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        hb.get_style_context().add_class("ts-panel-header")
+        hb.pack_start(self.header, True, True, 0)
+        self.pack_start(hb, False, False, 0)
+        sw = Gtk.ScrolledWindow()
+        sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        self.listbox = Gtk.ListBox()
+        self.listbox.set_selection_mode(Gtk.SelectionMode.NONE)
+        self.listbox.get_style_context().add_class("ts-files")
+        self.listbox.connect("row-activated", lambda lb, row: self.on_goto(row.seg[0]))
+        sw.add(self.listbox)
+        self.pack_start(sw, True, True, 0)
+        self._pix = {}            # (caché, t) -> pixbuf a tamaño de tarjeta
+        self._wanted = set()      # instantes sin miniatura aún (se completan cuando el generador las saque)
+        self._params = None
+        self._sig = None
+        self._id = None
+        self._segs = []
+
+    def refresh(self, doc, segs, ts, S, dur, force=False):
+        self._params = (doc, list(segs), ts, S, dur)
+        if force:
+            self._sig = None
+        if self._id is None:
+            self._id = GLib.timeout_add(120, self._rebuild)
+
+    def tile_ready(self, t):
+        if t in self._wanted and self._params is not None:
+            self.refresh(*self._params, force=True)
+        return False
+
+    def _rebuild(self):
+        self._id = None
+        doc, segs, ts, S, dur = self._params if self._params else (None, [], [], 1, 0.0)
+        sig = (id(doc), tuple(segs))
+        if sig == self._sig:
+            return False
+        self._sig = sig
+        self._segs = list(segs)
+        for child in self.listbox.get_children():
+            self.listbox.remove(child)
+        self._wanted = set()
+        total = sum(b - a for a, b in segs)
+        self.header.set_text("Sin segmentos" if not segs else "%d segmento%s · %s" % (
+            len(segs), "" if len(segs) == 1 else "s", fmt_time(total)))
+        for k, (a, b) in enumerate(segs):
+            self.listbox.add(self._make_row(doc, k, a, b, ts, S))
+        self.listbox.show_all()
+        if DEBUG:
+            GLib.idle_add(self._log_geometry)
+        return False
+
+    def _thumb(self, doc, t):
+        if doc is None or doc.cache_dir is None:
+            return None
+        key = (str(doc.cache_dir), t)
+        pb = self._pix.get(key)
+        if pb is not None:
+            return pb
+        try:
+            pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(doc.cache_dir / ("%d.jpg" % t)), 2 * self.THUMB_H,
+                                                         self.THUMB_H, True)
+        except GLib.Error:
+            self._wanted.add(t)
+            return None
+        if len(self._pix) > 400:
+            self._pix.clear()
+        self._pix[key] = pb
+        return pb
+
+    def _make_row(self, doc, k, a, b, ts, S):
+        row = Gtk.ListBoxRow()
+        row.seg = (a, b)
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        box.set_margin_start(4)
+        box.set_margin_end(2)
+        box.set_margin_top(2)
+        box.set_margin_bottom(2)
+        handle = Gtk.EventBox()
+        hl = Gtk.Label(label="≡")
+        hl.get_style_context().add_class("dim-label")
+        handle.add(hl)
+        handle.set_tooltip_text("Arrastra para cambiar el orden de corte")
+        handle.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, self.TARGETS, Gdk.DragAction.MOVE)
+        handle.connect("drag-begin", self._drag_begin)
+        handle.connect("drag-data-get", self._drag_data_get)
+        row.drag_dest_set(Gtk.DestDefaults.ALL, self.TARGETS, Gdk.DragAction.MOVE)
+        row.connect("drag-data-received", self._drag_received)
+        box.pack_start(handle, False, False, 0)
+        tiles = [t for t in ts if t < b and t + S > a]
+        edges = ([tiles[0]] + ([tiles[-1]] if len(tiles) > 1 else [])) if tiles else []
+        for t in edges:
+            pb = self._thumb(doc, t)
+            if pb is not None:
+                img = Gtk.Image.new_from_pixbuf(pb)
+            else:
+                img = Gtk.Frame()
+                img.set_size_request(int(self.THUMB_H * 16 / 9), self.THUMB_H)
+            box.pack_start(img, False, False, 0)
+        text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        text.set_valign(Gtk.Align.CENTER)
+        l1 = Gtk.Label()
+        l1.set_xalign(0.0)
+        l1.set_markup("<b>%d</b> · %s" % (k + 1, fmt_time(a)))
+        l2 = Gtk.Label()
+        l2.set_xalign(0.0)
+        l2.get_style_context().add_class("dim-label")
+        l2.set_markup(sub_markup("dura %s" % fmt_time(b - a)))
+        text.pack_start(l1, False, False, 0)
+        text.pack_start(l2, False, False, 0)
+        box.pack_start(text, True, True, 0)
+        close = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
+        close.set_relief(Gtk.ReliefStyle.NONE)
+        close.set_valign(Gtk.Align.CENTER)
+        close.set_tooltip_text("Quitar este tramo de la selección")
+        close.connect("clicked", lambda *_: self.on_delete(a, b))
+        box.pack_end(close, False, False, 0)
+        row.add(box)
+        row.set_tooltip_text("%s – %s" % (fmt_time(a), fmt_time(b)))
+        row.handle, row.close = handle, close
+        return row
+
+    # --- arrastrar y soltar para reordenar ---
+    def _drag_begin(self, handle, context):
+        row = handle.get_ancestor(Gtk.ListBoxRow)
+        alloc = row.get_allocation()
+        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, max(1, alloc.width), max(1, alloc.height))
+        row.draw(cairo.Context(surface))
+        Gtk.drag_set_icon_surface(context, surface)
+
+    def _drag_data_get(self, handle, context, data, info, time):
+        idx = handle.get_ancestor(Gtk.ListBoxRow).get_index()
+        data.set(data.get_target(), 8, str(idx).encode("ascii"))
+
+    def _drag_received(self, row, context, x, y, data, info, time):
+        try:
+            src = int(bytes(data.get_data()).decode("ascii"))
+        except (TypeError, ValueError):
+            return
+        dst = row.get_index()
+        if y > row.get_allocation().height / 2.0:
+            dst += 1
+        if src < dst:
+            dst -= 1
+        if src == dst or not (0 <= src < len(self._segs)):
+            return
+        segs = list(self._segs)
+        segs.insert(dst, segs.pop(src))
+        self.on_reorder(segs)
+
+    def _log_geometry(self):
+        top = self.get_toplevel()
+
+        def center(w):
+            a = w.get_allocation()
+            pt = w.translate_coordinates(top, 0, 0)
+            return "%d,%d" % (pt[-2] + a.width // 2, pt[-1] + a.height // 2) if pt else "?"
+        rows = self.listbox.get_children()
+        log("segpanel: %s · rows=%s · dels=%s" % (self.header.get_text(), ";".join(center(r.handle) for r in rows),
+                                                 ";".join(center(r.close) for r in rows)))
+        return False
+
+
 class Document(object):
     def __init__(self, path):
         self.path = pathlib.Path(path).resolve()
@@ -2350,6 +2552,11 @@ class ThumbSheet(Gtk.Window):
         self.del_btn.get_style_context().add_class("destructive-action")
         self.del_btn.set_tooltip_text("Borrar el archivo de vídeo del disco (sin papelera), tras confirmar")
         self.del_btn.connect("clicked", self.on_delete)
+        self.seg_btn = Gtk.ToggleButton(label="Segmentos")
+        self.seg_btn.set_tooltip_text("Panel de segmentos: los tramos seleccionados en su orden de corte (arrastra para "
+                                      "reordenar, × para quitar)")
+        self.seg_btn.set_active(bool(self.settings.get("segpanel", True)))
+        bar.pack_end(self.seg_btn, False, False, 0)
         bar.pack_end(self.del_btn, False, False, 0)
         self.llc_btn = Gtk.Button(label="LLC")
         self.cut_btn = Gtk.Button(label="Cortar")
@@ -2367,8 +2574,8 @@ class ThumbSheet(Gtk.Window):
         self.status = Gtk.Label(label="")
         self.status.set_xalign(1.0)
         self.status.set_ellipsize(Pango.EllipsizeMode.START)
-        self.status.set_width_chars(24)
-        self.status.set_max_width_chars(46)   # los mensajes largos se recortan, no estrechan los sliders
+        self.status.set_width_chars(46)
+        self.status.set_max_width_chars(46)   # ancho fijo: el mensaje cambia a menudo y los sliders no deben moverse
         status_box.pack_start(self.status, False, False, 0)
         self.progress = Gtk.ProgressBar()
         self.progress.set_show_text(True)
@@ -2381,7 +2588,16 @@ class ThumbSheet(Gtk.Window):
         self.overlay = Gtk.Overlay()
         vbox.pack_start(self.overlay, True, True, 0)
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        self.overlay.add(self.paned)
+        self.segpanel = SegPanel(self._seg_reorder, self._seg_delete, self._seg_goto)
+        self.seg_revealer = Gtk.Revealer()
+        self.seg_revealer.set_transition_type(Gtk.RevealerTransitionType.SLIDE_LEFT)
+        self.seg_revealer.add(self.segpanel)
+        self.seg_revealer.set_reveal_child(self.seg_btn.get_active())
+        self.seg_btn.connect("toggled", lambda b: self.seg_revealer.set_reveal_child(b.get_active()))
+        main = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        main.pack_start(self.paned, True, True, 0)
+        main.pack_end(self.seg_revealer, False, False, 0)
+        self.overlay.add(main)
         self.layer = PreviewLayer()
         self.layer.on_close = self.hide_preview
         self.layer.on_toggle_play = self.toggle_play
@@ -2577,9 +2793,7 @@ class ThumbSheet(Gtk.Window):
         self.hide_preview()
         if self.current is not None:
             self.current.scroll = self.scroller.get_vadjustment().get_value()
-        if self.generator:
-            self.generator.cancel()
-            self.generator = None
+        self._cancel_generator()
         self.current = doc
         self._load_current()
 
@@ -2611,12 +2825,15 @@ class ThumbSheet(Gtk.Window):
     def _start_generator(self, doc, foreground):
         """Lanza la generación de `doc` al intervalo actual. En primer plano alimenta el mosaico; en
         segundo plano sólo rellena la caché (el mosaico muestra otro vídeo)."""
-        if self.generator:
-            self.generator.cancel()
+        self._cancel_generator()
         S = self.current_interval()
         holder = []
         current = lambda: self.generator is holder[0]  # noqa: E731
-        on_tile = self.sheet.tile_ready if foreground else (lambda t: False)
+        def fg_tile(t):
+            self.sheet.tile_ready(t)
+            self.segpanel.tile_ready(t)
+            return False
+        on_tile = fg_tile if foreground else (lambda t: False)
         on_failed = self.sheet.tile_failed if foreground else (lambda t: False)
         on_aspect = self.sheet.set_aspect if foreground else (lambda t, a: False)
         gen = Generator(doc.info, doc.cache_dir, S,
@@ -2639,22 +2856,40 @@ class ThumbSheet(Gtk.Window):
         (fotogramas completos o reproductor), sondeo de ficheros recién añadidos o borrado. Mientras tanto, la
         generación de los demás vídeos espera para no quitarle máquina."""
         gen = self.generator
+        why = None
         if gen is not None and not gen.finished and self.gen_doc is self.current:
-            return True
-        if self._cut is not None or self.layer.get_visible():
-            return True
-        return bool(self._probe_q.qsize()) or any(d.deleting for d in self.docs)
+            why = "generando el vídeo a la vista"
+        elif self._cut is not None:
+            why = "cortando"
+        elif self.layer.get_visible():
+            why = "vista ampliada abierta"
+        elif self._probe_q.qsize():
+            why = "sondeando ficheros"
+        elif any(d.deleting for d in self.docs):
+            why = "borrando"
+        if why and DEBUG:
+            log("segundo plano: espera (%s)" % why)
+        return why is not None
+
+    def _cancel_generator(self):
+        """Para el generador en marcha. Si era de un vídeo que no está a la vista y no había acabado, ese vídeo
+        vuelve a ser candidato a segundo plano: antes quedaba marcado como intentado para este intervalo y no se
+        retomaba hasta cambiar de intervalo (al abrir ese vídeo sus teselas faltaban y se generaban al vuelo)."""
+        gen = self.generator
+        if gen is None:
+            return
+        gen.cancel()
+        self.generator = None
+        if not gen.finished and self.gen_doc is not None and self.gen_doc is not self.current:
+            self.gen_doc.bg_tried = None
 
     def _pause_background(self):
         """Empieza una operación interactiva: si se estaba generando un vídeo que no está a la vista, se para (lo
         hecho queda en caché) y vuelve a ser candidato cuando la operación termine."""
         gen = self.generator
         if gen is not None and not gen.finished and self.gen_doc is not self.current:
-            gen.cancel()
-            self.generator = None
-            if self.gen_doc is not None:
-                self.gen_doc.bg_tried = None
             log("segundo plano: en pausa (%s)" % (self.gen_doc.path.name if self.gen_doc else "?"))
+            self._cancel_generator()
             self._refresh_status()
             self._refresh_row_states()
 
@@ -2727,7 +2962,7 @@ class ThumbSheet(Gtk.Window):
         doc = self.current
         if not doc or not doc.info:
             return []
-        return list(doc.selection.segments)
+        return doc.selection.ordered()   # Cortar y LLC respetan el orden del panel de segmentos
 
     def _refresh_row_states(self):
         """Icono de la segunda línea de cada fila: traslúcido mientras se generan sus miniaturas (a la vista o
@@ -2791,6 +3026,7 @@ class ThumbSheet(Gtk.Window):
             base += " · %d segmento%s" % (n, "" if n == 1 else "s")
         self._status_base = base
         self.status.set_text(base)
+        self._refresh_segpanel()
         # barra: corte > generación (actual o en segundo plano) > nada
         if self._cut is not None:
             if self._cut_pct is None:
@@ -2868,6 +3104,37 @@ class ThumbSheet(Gtk.Window):
             self.current.save_selection()
         self._refresh_status()
         self._update_buttons()
+
+    # ---- panel de segmentos -----------------------------------------------------------------------
+    def _refresh_segpanel(self, force=False):
+        doc = self.current
+        if doc is None or doc.info is None:
+            self.segpanel.refresh(None, [], [], 1, 0.0, force)
+            return
+        ts, S, dur = self._grid()
+        self.segpanel.refresh(doc, doc.selection.ordered(), ts, S, dur, force)
+
+    def _seg_reorder(self, segs):
+        doc = self.current
+        if doc is None:
+            return
+        doc.selection.set_order(segs)
+        doc.save_selection()
+        self._refresh_segpanel()
+
+    def _seg_delete(self, a, b):
+        doc = self.current
+        if doc is None or doc.info is None:
+            return
+        doc.selection.remove(a, b)
+        ts, S, dur = self._grid()
+        self.sheet.set_selected(doc.selection.tiles(ts, S, dur))
+        doc.save_selection()
+        self._refresh_status()
+        self._update_buttons()
+
+    def _seg_goto(self, t):
+        self.sheet.scroll_to_time(t)
 
     def clear_selection(self):
         doc = self.current
@@ -3607,7 +3874,7 @@ class ThumbSheet(Gtk.Window):
             "interval": self.current_interval(),
             "cols": int(round(self.tile_scale.get_value())),
             "win_w": w, "win_h": h, "maximized": self._maximized,
-            "panel_w": self.paned.get_position(),
+            "panel_w": self.paned.get_position(), "segpanel": self.seg_btn.get_active(),
         })
         save_settings(settings)
         Gtk.main_quit()

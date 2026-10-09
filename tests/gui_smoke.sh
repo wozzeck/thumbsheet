@@ -119,6 +119,19 @@ chk "doble clic deselecciona el tramo contiguo $A–$B" "$(sel)" "$(seg $S0 $((4
 T30=$((3*COLS*S0)); xdotool mousemove $(tile 3 0) click --repeat 2 --delay 90 1; sleep 0.6
 chk "doble clic sobre no seleccionada: la deja seleccionada ($T30–$((T30+S0)))" "$(sel)" "$(seg $S0 $((4*S0)) $T30 $((T30+S0)))"
 
+# 7b. panel de segmentos: dos tarjetas; arrastrar la 2.ª sobre la 1.ª cambia el orden de corte; × quita un tramo
+sleep 0.6; SP=$(grep "segpanel:" "$OUT/app.log" | tail -1)
+[[ "$SP" == *"2 segmentos"* ]] && ok "panel de segmentos: ${SP#*segpanel: }" || ko "panel de segmentos: '$SP'"
+R1=$(echo "$SP" | sed -E 's/.*rows=([^ ]+).*/\1/' | cut -d';' -f1); R2=$(echo "$SP" | sed -E 's/.*rows=([^ ]+).*/\1/' | cut -d';' -f2)
+xdotool mousemove $((X+${R2%,*})) $((Y+${R2#*,})) mousedown 1; sleep 0.2
+for d in 3 7 12 18 25; do xdotool mousemove $((X+${R2%,*}+d)) $((Y+${R2#*,}-d)); sleep 0.08; done
+xdotool mousemove $((X+${R1%,*}+60)) $((Y+${R1#*,}-10)); sleep 0.3; xdotool mousemove $((X+${R1%,*}+62)) $((Y+${R1#*,}-10)); sleep 0.3; xdotool mouseup 1; sleep 0.9
+python3 -c "import json,sys; d=json.loads(sys.argv[1]); sys.exit(0 if d.get('order')==[1080,60] else 1)" "$(sel)" && ok "arrastrar la 2.ª tarjeta sobre la 1.ª: orden de corte 1080 → 60" || ko "orden tras arrastrar: $(sel)"
+shot 7b-segmentos 0.3
+SP=$(grep "segpanel:" "$OUT/app.log" | tail -1); D1=$(echo "$SP" | sed -E 's/.*dels=([^ ]+).*/\1/' | cut -d';' -f1)
+xdotool mousemove $((X+${D1%,*})) $((Y+${D1#*,})) click 1; sleep 0.9
+chk "× de la primera tarjeta quita el tramo 1080–1140" "$(sel)" "$(seg 60 240)"
+
 # 8. segundo vídeo y vuelta
 xdotool mousemove $((X+${ROW2%,*})) $((Y+${ROW2#*,})) click 1; shot 5-segundo-video 3
 xdotool mousemove $((X+${ROW1%,*})) $((Y+${ROW1#*,})) click 1; shot 6-vuelta 1.5

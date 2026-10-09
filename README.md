@@ -84,6 +84,11 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   termina bien y la duración del resultado cuadra. Mientras dura el corte el diálogo se queda abierto
   mostrando el progreso, con Cancelar; en cuanto empieza el borrado se cierra, y el borrado va en
   segundo plano como con Eliminar: el original desaparece del panel y se abre el siguiente de la lista.
+- **Panel de segmentos** (derecha, plegable con el botón **Segmentos**): los tramos seleccionados en su
+  orden de corte, cada uno con su primer y último fotograma, inicio y duración; la cabecera dice cuántos
+  hay y cuánto suman. Arrastra una tarjeta por su asa para cambiar el orden, que es el que usan Cortar y
+  el proyecto LLC; × quita el tramo; clic lleva el mosaico a ese instante. El orden se guarda con la
+  selección y sobrevive a los retoques de los tramos.
 - **Eliminar**: borra el archivo de vídeo del disco directamente, sin papelera, tras confirmar. El borrado
   (el fichero y su caché de miniaturas, que pueden ser miles) va en segundo plano: el diálogo se cierra al
   momento, la fila queda como "Eliminando…" y se pasa al siguiente vídeo; al terminar sale el toast y la

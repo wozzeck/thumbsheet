@@ -18,8 +18,10 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   indica qué parte de sus miniaturas para el intervalo actual está ya en caché, por cuartos: cada
   cuadrito sólido son 25 %; los que faltan van traslúcidos mientras se generan y casi invisibles si
   no. Clic en una fila para ver su sábana. Cuando el vídeo a la vista termina de generarse, los demás
-  se van generando **en segundo plano** al mismo intervalo, de uno en uno; el vídeo a la vista y los
-  cambios de intervalo tienen siempre prioridad.
+  se van generando **en segundo plano** al mismo intervalo, de uno en uno, pero sólo mientras no haya
+  otra operación en marcha: generación del vídeo a la vista, corte, vista ampliada, sondeo de ficheros
+  recién añadidos o borrado. Si empieza una, la de segundo plano se para (lo hecho queda en caché) y se
+  retoma al terminar, para que lo interactivo vaya siempre lo más rápido posible.
 - **Orden de generación**: lo que está en pantalla se genera primero, luego lo que viene por delante y al
   final lo que ha quedado atrás al hacer scroll; la cola se reordena con cada movimiento, así que en un
   equipo lento puedes avanzar por la sábana más deprisa de lo que se genera y ver siempre lo que miras.

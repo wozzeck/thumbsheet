@@ -2506,6 +2506,7 @@ class ThumbSheet(Gtk.Window):
             first_new = first_new or doc
         if first_new is not None:
             self._update_count()
+            self._pause_background()   # sondeo pendiente: que el segundo plano no lo frene
         if first_new is not None and self.current is None:
             self.listbox.select_row(first_new.row)
 
@@ -2633,12 +2634,36 @@ class ThumbSheet(Gtk.Window):
         self._refresh_row_states()
         return gen
 
+    def _busy(self):
+        """Hay una operación interactiva en marcha: generación del vídeo a la vista, corte, vista ampliada
+        (fotogramas completos o reproductor), sondeo de ficheros recién añadidos o borrado. Mientras tanto, la
+        generación de los demás vídeos espera para no quitarle máquina."""
+        gen = self.generator
+        if gen is not None and not gen.finished and self.gen_doc is self.current:
+            return True
+        if self._cut is not None or self.layer.get_visible():
+            return True
+        return bool(self._probe_q.qsize()) or any(d.deleting for d in self.docs)
+
+    def _pause_background(self):
+        """Empieza una operación interactiva: si se estaba generando un vídeo que no está a la vista, se para (lo
+        hecho queda en caché) y vuelve a ser candidato cuando la operación termine."""
+        gen = self.generator
+        if gen is not None and not gen.finished and self.gen_doc is not self.current:
+            gen.cancel()
+            self.generator = None
+            if self.gen_doc is not None:
+                self.gen_doc.bg_tried = None
+            log("segundo plano: en pausa (%s)" % (self.gen_doc.path.name if self.gen_doc else "?"))
+            self._refresh_status()
+            self._refresh_row_states()
+
     def _start_next_background(self):
         """Cuando no hay nada generándose, sigue con el siguiente vídeo del panel (en orden, dando la
         vuelta) que aún no tenga todas las capturas de este intervalo. Uno cada vez."""
         if self.generator is not None and not self.generator.finished:
             return False
-        if not self.docs:
+        if not self.docs or self._busy():
             return False
         S = self.current_interval()
         start = self.gen_doc if self.gen_doc in self.docs else self.current
@@ -2872,6 +2897,7 @@ class ThumbSheet(Gtk.Window):
         if doc is None or doc.info is None:
             return
         self._preview_key = (doc, t)
+        self._pause_background()
         pb = self.sheet.cache.get(t)
         thumb = doc.cache_dir / ("%d.jpg" % t)
         if pb is None and thumb.exists():
@@ -2972,6 +2998,7 @@ class ThumbSheet(Gtk.Window):
         self._stop_player()
         if self.layer.get_visible():
             self.layer.hide()
+            GLib.idle_add(self._start_next_background)
 
     # ---- reproducción (GStreamer) dentro de la vista ampliada -----------------------------------
     def _ensure_player(self):
@@ -3198,6 +3225,7 @@ class ThumbSheet(Gtk.Window):
         self._cut_pct = None
         self._update_buttons()
         self._refresh_status()
+        self._pause_background()
         threading.Thread(target=self._cut_worker, args=(self._cut,), name="ts-cut", daemon=True).start()
 
     def _cut_worker(self, job):
@@ -3290,6 +3318,7 @@ class ThumbSheet(Gtk.Window):
         if job.get("dlg") is not None:
             job["dlg"].destroy()   # terminó el corte: lo que sigue (borrar el original) va en segundo plano
         self._update_buttons()
+        GLib.idle_add(self._start_next_background)
         self._refresh_status()
         out = job["out"]
         if error == "cancelado":
@@ -3370,8 +3399,7 @@ class ThumbSheet(Gtk.Window):
             doc.row.sub_label.set_markup(sub_markup("Eliminando…"))
         if doc is self.current:
             self._show_neighbor(doc)
-        if self.generator is None:
-            GLib.idle_add(self._start_next_background)
+        self._pause_background()
         ok_text = ok_text or ("Eliminado: %s" % doc.path.name)
         err_text = err_text or "No se pudo eliminar el archivo"
 
@@ -3399,6 +3427,7 @@ class ThumbSheet(Gtk.Window):
 
     def _delete_done(self, doc, err, ok_text, err_text, ok_log):
         doc.deleting = False
+        GLib.idle_add(self._start_next_background)
         if err:
             if doc.row is not None:
                 doc.row.set_sensitive(True)

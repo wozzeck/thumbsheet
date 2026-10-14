@@ -308,7 +308,7 @@ class VideoInfo(object):
         except subprocess.TimeoutExpired:
             raise RuntimeError("ffprobe no responde (¿ubicación remota caída?)")
         if r.returncode != 0:
-            raise RuntimeError(r.stderr.decode("utf-8", "replace").strip() or "ffprobe falló")
+            raise RuntimeError(short_error(r.stderr.decode("utf-8", "replace"), "ffprobe falló"))
         data = json.loads(r.stdout.decode("utf-8", "replace") or "{}")
         streams = data.get("streams") or []
         videos = [x for x in streams if x.get("codec_type") == "video"]
@@ -501,6 +501,31 @@ def plan_timestamps(duration, interval):
     return out
 
 
+_RE_FF_PREFIX = re.compile(r"^\[[^\]]*\]\s*")
+_FF_GENERIC = ("Conversion failed", "Nothing was written into output", "Error opening input file ", "Command exited")
+
+
+def short_error(text, default="error", limit=160):
+    """Resumen en una línea de un stderr de ffmpeg/ffprobe (o de cualquier mensaje): la última línea con sustancia,
+    sin el prefijo «[mov,mp4 @ 0x…]» ni la ruta del fichero, acortada; para tooltips, barra de estado y toasts.
+    Si la última es el genérico «Invalid data found…» y hay otra antes (p. ej. «moov atom not found»), se añade."""
+    lines = []
+    for raw in (text or "")[-4000:].splitlines():
+        line = _RE_FF_PREFIX.sub("", raw.strip())
+        if not line or line.startswith(_FF_GENERIC):
+            continue
+        head, sep, rest = line.partition(": ")
+        if sep and rest and (os.sep in head or re.search(r"\.\w{2,4}$", head)):
+            line = rest   # «/ruta/vídeo.mp4: Invalid data found…» → «Invalid data found…»
+        lines.append(line)
+    if not lines:
+        return default
+    out = lines[-1]
+    if out.startswith("Invalid data found") and len(lines) > 1 and lines[-2] != out:
+        out = "%s (%s)" % (out, lines[-2])
+    return out if len(out) <= limit else out[:limit - 1] + "…"
+
+
 _RETRY_ERRNOS = {errno.EBUSY, errno.ETXTBSY, errno.EAGAIN, errno.EACCES, errno.EPERM}
 
 
@@ -545,7 +570,8 @@ def doc_complete(doc, interval):
 class Generator(object):
     """Genera las capturas de un intervalo dado. Avisa por GLib.idle_add: on_tile(t), on_failed(t) (no hay
     fotograma que sacar: datos truncados o dañados, queda marcado con <t>.fail y no se reintenta),
-    on_progress(done, total), on_done(). Cancelable (mata los ffmpeg en marcha).
+    on_progress(done, total), on_done(). Cancelable (mata los ffmpeg en marcha). Si el vídeo no da NINGÚN
+    fotograma se desiste pronto (self.error; ver _maybe_give_up) en vez de marcar cientos de capturas una a una.
 
     Orden de trabajo (ver _task_key): primero lo que está a la vista (focus_fn), luego lo que viene por delante
     y al final lo que quedó atrás. Sólo cambia el orden, no el trabajo."""
@@ -579,6 +605,13 @@ class Generator(object):
         self.pending = 0
         self.done_count = 0
         self.finished = False
+        self.error = None          # texto si se ha desistido: el vídeo no da ningún fotograma (ver _maybe_give_up)
+        self.hard_fails = 0        # capturas imposibles (ffmpeg terminó sin fotograma) en esta pasada
+        self.frames_made = 0       # fotogramas obtenidos en esta pasada
+        self.had_frames = False    # ya había alguno en caché al arrancar
+        self.last_err = ""         # resumen del último stderr de ffmpeg con error
+        self._verifying = False
+        self._fails_written = []   # marcas .fail de esta pasada (se retiran si al final se desiste)
         self.gpu_ok = False
         self.threads = []
         self.started = time.time()
@@ -605,6 +638,7 @@ class Generator(object):
         except OSError:
             pass
         failed -= cached
+        self.had_frames = bool(cached)
         missing = [t for t in self.timestamps if t not in cached and t not in failed]
         self.pending_ts = set(missing)
         self.done_count = self.initial_done = self.total - len(missing)
@@ -773,6 +807,8 @@ class Generator(object):
         while not self.cancelled.is_set():
             if kind == "gpu" and not self.gpu_ok:
                 return
+            if self._maybe_give_up():
+                return   # el vídeo no se puede decodificar: la cola ya está vacía y _finish llega por la cuenta
             task = self._pop_task()
             if task is None:
                 return
@@ -786,14 +822,17 @@ class Generator(object):
                 log("worker: excepción", e)
             if self.cancelled.is_set():
                 return
-            if not ok and kind == "gpu":
-                # la GPU ha fallado con este tramo: lo devuelve a la cola para la CPU y se retira
+            if not ok and kind == "gpu" and self.error is None:
+                # la GPU ha fallado con este tramo: lo devuelve a la cola y este hilo sigue como worker de CPU. Si
+                # se retirara sin más y fuera el último tramo, los workers de CPU ya habrían acabado y nadie lo
+                # recogería: el generador no terminaría nunca y el segundo plano quedaría parado.
                 log("gpu: fallo en tramo, se desactiva")
                 self.gpu_ok = False
                 with self.lock:
                     self.tasks.append(task)
                     self._order_key = None
-                return
+                kind, dev = "cpu", None
+                continue
             with self.lock:
                 self.pending -= 1
                 last = self.pending == 0
@@ -838,6 +877,7 @@ class Generator(object):
         err = err.decode("utf-8", "replace")
         if p.returncode != 0 and not self.cancelled.is_set():
             log("ffmpeg rc=%s: %s" % (p.returncode, err.strip()[-300:]))
+            self.last_err = short_error(err, "ffmpeg falló (rc %s)" % p.returncode)
         return p.returncode == 0, err
 
     # --- aspecto real de cada miniatura (vídeos que cambian de orientación o resolución) ---
@@ -928,6 +968,9 @@ class Generator(object):
         return opts + ["-y", out]
 
     def _do_seek(self, t):
+        with self.lock:
+            if t not in self.pending_ts:
+                return True   # ya resuelto por otra tarea (p. ej. la comprobación de _maybe_give_up)
         final = self.cache_dir / ("%d.jpg" % t)
         tmp = self.cache_dir / (".%d.tmp.jpg" % t)
         vf = fit_vf(self.info.thumb_w, self.info.thumb_h)   # con su proporción real
@@ -1014,7 +1057,7 @@ class Generator(object):
             # lo que el tramo no ha producido (datos truncados o dañados) se reintenta una a una con seek;
             # lo que tampoco salga así queda marcado como no generable
             for i in range(published, n):
-                if self.cancelled.is_set():
+                if self.cancelled.is_set() or self._maybe_give_up():
                     return False
                 self._do_seek(ts[i])
             return ok
@@ -1031,6 +1074,7 @@ class Generator(object):
 
     def _tile_ready(self, t):
         with self.lock:
+            self.frames_made += 1
             fresh = t in self.pending_ts
             if fresh:
                 self.pending_ts.discard(t)
@@ -1054,6 +1098,10 @@ class Generator(object):
                 return   # ya resuelto por otra tarea
             self.pending_ts.discard(t)
             self.done_count += 1
+            permanent = permanent and self.error is None   # desistido: sin marcas ni avisos
+            if permanent:
+                self.hard_fails += 1
+                self._fails_written.append(t)
         if permanent:
             try:
                 (self.cache_dir / ("%d.fail" % t)).touch()
@@ -1061,6 +1109,50 @@ class Generator(object):
                 pass
             GLib.idle_add(self.on_failed, t)
         self._progress()
+
+    GIVE_UP_FAILS = 3   # capturas imposibles, sin ningún fotograma del vídeo, antes de comprobar si es decodificable
+
+    def _maybe_give_up(self):
+        """Vídeo que no se puede decodificar (códec sin soporte, fichero que no es lo que dice, DRM, datos a ceros…):
+        ffprobe da duración y resolución, pero ninguna captura sale. Marcarlas una a una como imposibles costaría un
+        ffmpeg por captura (minutos en un vídeo largo, más en remoto), bloquearía el segundo plano mientras tanto y
+        dejaría el icono como «listas». Así que, cuando han fallado ya unas cuantas sin que este vídeo haya dado
+        NINGÚN fotograma (ni en esta pasada ni en caché), se prueba una captura en mitad del vídeo: si tampoco sale,
+        se desiste (self.error), se vacía la cola y no se deja ninguna marca .fail (si fue algo pasajero, la próxima
+        pasada lo reintenta). Si la del medio sale, es un vídeo dañado sólo al principio y se sigue con normalidad.
+        Devuelve True si se ha desistido. Lo llaman los workers antes de cada tarea y los tramos en su reintento."""
+        with self.lock:
+            if self.error is not None:
+                return True
+            if self.frames_made or self.had_frames or self.hard_fails < self.GIVE_UP_FAILS or self.cancelled.is_set():
+                return False
+            verify = not self._verifying
+            self._verifying = True
+        if not verify:   # otro worker ya está comprobando: esperar su veredicto en vez de seguir fallando capturas
+            while self._verifying and not self.cancelled.is_set():
+                time.sleep(0.05)
+            return self.error is not None
+        try:
+            with self.lock:
+                pend = sorted(self.pending_ts)
+            if not pend:
+                return False
+            goal = self.info.duration / 2.0
+            mid = min(pend, key=lambda t: abs(t - goal))
+            log("sin fotogramas tras %d capturas fallidas: se comprueba a los %d s [%s]" % (
+                self.hard_fails, mid, self.info.path.name))
+            if self._do_seek(mid) or self.cancelled.is_set():
+                return False
+            with self.lock:
+                self.error = self.last_err or "ffmpeg no saca ningún fotograma"
+                self.pending -= len(self.tasks)   # lo encolado no se va a hacer; sólo quedan las tareas en curso
+                self.tasks.clear()
+                last = self.pending <= 0
+            if last:
+                GLib.idle_add(self._finish)
+            return True
+        finally:
+            self._verifying = False
 
     def _progress(self):
         GLib.idle_add(self.on_progress, self.done_count, self.total)
@@ -1070,7 +1162,16 @@ class Generator(object):
             return False
         self.finished = True
         self._flush_aspects()
-        log("fin: %d capturas en %.1fs (%s) [%s]" % (self.total, time.time() - self.started, self.mode, self.info.path.name))
+        if self.error is not None:
+            for t in self._fails_written:   # las pocas marcas de la comprobación: que la próxima pasada reintente
+                try:
+                    (self.cache_dir / ("%d.fail" % t)).unlink()
+                except OSError:
+                    pass
+            log("fin: sin fotogramas, se desiste tras %d capturas y %.1fs [%s]: %s" % (
+                self.hard_fails, time.time() - self.started, self.info.path.name, self.error))
+        else:
+            log("fin: %d capturas en %.1fs (%s) [%s]" % (self.total, time.time() - self.started, self.mode, self.info.path.name))
         self.on_done()
         return False
 
@@ -1445,6 +1546,12 @@ class Sheet(Gtk.DrawingArea):
                 a, b = self.visible
             if a <= i <= b:
                 self._redraw_tile(i)
+        return False
+
+    def fail_all(self):
+        """El vídeo no da ningún fotograma (Generator._maybe_give_up): aspa en todas las que faltan."""
+        self.failed.update(t for t in self.ts if t not in self.ready)
+        self.queue_draw()
         return False
 
     # --- posición de lectura: la tesela del centro del visor sigue en el centro al recomponer ---
@@ -2524,14 +2631,16 @@ def short_dir(path):
 class StateIcon(Gtk.DrawingArea):
     """Icono de cada fila del panel: cuatro cuadritos = cuartos de las miniaturas del vídeo que ya están en
     caché para el intervalo actual (negros); los que faltan sólo se pintan, en gris claro, mientras se está
-    generando. Sin nada en caché y sin generar no se pinta nada. Sólo se repinta cuando cambia de cuarto, no por
-    cada captura."""
+    generando. Sin nada en caché y sin generar no se pinta nada. Aspa roja si el vídeo no se puede abrir o no da
+    ningún fotograma (el texto del error va en el tooltip). Sólo se repinta cuando cambia de cuarto, no por cada
+    captura."""
     SIZE = 11
 
     def __init__(self):
         super(StateIcon, self).__init__()
         self.quarters = 0
         self.working = False
+        self.error = None
         self.set_size_request(self.SIZE, self.SIZE)
         self.set_valign(Gtk.Align.CENTER)
         self.set_tooltip_text(self.describe())
@@ -2546,14 +2655,25 @@ class StateIcon(Gtk.DrawingArea):
         else:
             q = min(3, int(4 * done / float(total)))
         working = bool(working) and q < 4
-        if (q, working) == (self.quarters, self.working):
+        if (q, working, None) == (self.quarters, self.working, self.error):
             return False
-        self.quarters, self.working = q, working
+        self.quarters, self.working, self.error = q, working, None
+        self.set_tooltip_text(self.describe())
+        self.queue_draw()
+        return True
+
+    def set_error(self, text):
+        """Vídeo que no se puede abrir o del que ffmpeg no saca ningún fotograma: aspa roja. True si cambia."""
+        if text == self.error:
+            return False
+        self.error = text
         self.set_tooltip_text(self.describe())
         self.queue_draw()
         return True
 
     def describe(self):
+        if self.error is not None:
+            return self.error
         pct = self.quarters * 25
         if self.quarters == 4:
             return "Miniaturas generadas"
@@ -2562,6 +2682,8 @@ class StateIcon(Gtk.DrawingArea):
         return "Miniaturas pendientes" if pct == 0 else "Miniaturas: %d %% o más en caché" % pct
 
     def state_name(self):
+        if self.error is not None:
+            return "error"
         pct = self.quarters * 25
         if self.quarters == 4:
             return "listas"
@@ -2570,8 +2692,19 @@ class StateIcon(Gtk.DrawingArea):
         return "pendientes" if pct == 0 else "%d %%" % pct
 
     def on_draw(self, widget, cr):
-        c = self.get_style_context().get_color(self.get_state_flags())
         s, g = float(self.SIZE), 1.5
+        if self.error is not None:   # aspa roja, como las teselas sin fotograma del mosaico
+            r = s / 2.0 - 1.0
+            cr.set_source_rgb(0.93, 0.16, 0.16)
+            cr.set_line_width(2.2)
+            cr.set_line_cap(cairo.LINE_CAP_ROUND)
+            cr.move_to(s / 2.0 - r, s / 2.0 - r)
+            cr.line_to(s / 2.0 + r, s / 2.0 + r)
+            cr.move_to(s / 2.0 + r, s / 2.0 - r)
+            cr.line_to(s / 2.0 - r, s / 2.0 + r)
+            cr.stroke()
+            return False
+        c = self.get_style_context().get_color(self.get_state_flags())
         q = (s - g) / 2.0   # cuatro cuadritos: un mosaico en miniatura, que se va completando por cuartos
         for i, (x, y) in enumerate(((0, 0), (q + g, 0), (0, q + g), (q + g, q + g))):
             if i < self.quarters:
@@ -2772,7 +2905,8 @@ class Document(object):
     def __init__(self, path):
         self.path = pathlib.Path(path).resolve()
         self.info = None
-        self.error = None
+        self.error = None                     # no se pudo abrir (sondeo): texto
+        self.gen_error = None                 # ffmpeg no saca ningún fotograma: texto; fuera del segundo plano hasta reintentar
         self.cache_dir = None
         self.selection = Selection()
         self.scroll = 0.0
@@ -2787,19 +2921,21 @@ class Document(object):
                 return
             try:
                 info = VideoInfo(self.path)
-            except (OSError, RuntimeError) as e:
-                self.error = str(e) or "no se pudo abrir"
+                cache_dir = CACHE_ROOT / info.key
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                for leftover in cache_dir.glob(".*"):   # tramos/temporales de una ejecución interrumpida
+                    if leftover.is_dir():
+                        shutil.rmtree(str(leftover), ignore_errors=True)
+                    else:
+                        try:
+                            leftover.unlink()
+                        except OSError:
+                            pass
+            except Exception as e:  # noqa: BLE001
+                # OSError/RuntimeError normalmente; cualquier otra cosa (salida rara de ffprobe, caché que no se
+                # puede crear…) también deja el vídeo en error: el hilo de sondeo no puede morir (ver _busy)
+                self.error = short_error(str(e), "no se pudo abrir")
                 return
-            cache_dir = CACHE_ROOT / info.key
-            cache_dir.mkdir(parents=True, exist_ok=True)
-            for leftover in cache_dir.glob(".*"):   # tramos/temporales de una ejecución interrumpida
-                if leftover.is_dir():
-                    shutil.rmtree(str(leftover), ignore_errors=True)
-                else:
-                    try:
-                        leftover.unlink()
-                    except OSError:
-                        pass
             try:
                 self.selection = Selection.from_json(json.loads((cache_dir / "selection.json").read_text(encoding="utf-8")))
             except (OSError, ValueError, TypeError):
@@ -3189,7 +3325,14 @@ class ThumbSheet(Gtk.Window):
     def _probe_loop(self):
         while True:
             doc = self._probe_q.get()
-            doc.ensure_info()
+            try:
+                doc.ensure_info()
+            except Exception as e:  # noqa: BLE001  — por si acaso: si este hilo muriera, la cola quedaría parada
+                log("sondeo: excepción con %s: %r" % (doc.path.name, e))
+                if doc.info is None and doc.error is None:
+                    doc.error = short_error(str(e), e.__class__.__name__)
+            if doc.error:
+                log("sondeo: %s: no se pudo abrir: %s" % (doc.path.name, doc.error))
             GLib.idle_add(self._doc_probed, doc)
 
     def _doc_probed(self, doc):
@@ -3258,6 +3401,7 @@ class ThumbSheet(Gtk.Window):
         """Lanza la generación de `doc` al intervalo actual. En primer plano alimenta el mosaico; en
         segundo plano sólo rellena la caché (el mosaico muestra otro vídeo)."""
         self._cancel_generator()
+        doc.gen_error = None   # si había desistido, esta pasada lo reintenta
         S = self.current_interval()
         holder = []
         current = lambda: self.generator is holder[0]  # noqa: E731
@@ -3343,8 +3487,8 @@ class ThumbSheet(Gtk.Window):
         i0 = self.docs.index(start) + 1 if start in self.docs else 0
         for k in range(len(self.docs)):
             doc = self.docs[(i0 + k) % len(self.docs)]
-            if doc is self.current or doc.info is None or doc.bg_tried == S or doc.deleting:
-                continue
+            if doc is self.current or doc.info is None or doc.bg_tried == S or doc.deleting or doc.gen_error:
+                continue   # gen_error: no da fotogramas; no se insiste hasta que se abra ese vídeo
             doc.bg_tried = S
             if doc_complete(doc, S):
                 continue
@@ -3400,6 +3544,13 @@ class ThumbSheet(Gtk.Window):
         return False
 
     def on_done(self):
+        gen, doc = self.generator, self.gen_doc
+        if gen is not None and gen.error is not None and doc is not None:
+            # el vídeo no da ningún fotograma: aspa roja en el panel, fuera del segundo plano, y se sigue con el resto
+            doc.gen_error = gen.error
+            if doc is self.current:
+                self.sheet.fail_all()
+                self.toast.show_error("No se pudieron sacar fotogramas: %s" % gen.error)
         self._refresh_status()
         self._refresh_row_states()
         GLib.idle_add(self._start_next_background)
@@ -3413,8 +3564,9 @@ class ThumbSheet(Gtk.Window):
         return doc.selection.ordered()   # Cortar y LLC respetan el orden del panel de segmentos
 
     def _refresh_row_states(self):
-        """Icono de la segunda línea de cada fila: traslúcido mientras se generan sus miniaturas (a la vista o
-        en segundo plano), sólido cuando están todas para el intervalo actual, casi invisible si pendientes."""
+        """Icono de la tercera línea de cada fila: cuartos en gris claro mientras se generan sus miniaturas (a la
+        vista o en segundo plano), negros según están en caché para el intervalo actual, aspa roja si el vídeo no
+        se puede abrir o no da fotogramas."""
         S = self.current_interval()
         busy = self.generator is not None and not self.generator.finished
         gen_doc = self.gen_doc if busy else None
@@ -3422,7 +3574,14 @@ class ThumbSheet(Gtk.Window):
             done, total = self._progress
             if gen_doc.row.state.set_progress(done, total, True) and DEBUG:
                 log("estado: %s → %s" % (gen_doc.path.name, gen_doc.row.state.state_name()))
-        docs = [d for d in self.docs if d.row is not None and d.info is not None and d is not gen_doc]
+        for d in self.docs:
+            if d.row is None or d is gen_doc or not (d.error or d.gen_error):
+                continue
+            text = ("No se pudo abrir: %s" % d.error) if d.error else \
+                ("No se pudieron sacar fotogramas: %s\nClic en el vídeo para reintentar." % d.gen_error)
+            if d.row.state.set_error(text) and DEBUG:
+                log("estado: %s → %s" % (d.path.name, d.row.state.state_name()))
+        docs = [d for d in self.docs if d.row is not None and d.info is not None and d is not gen_doc and not d.gen_error]
         if not docs:
             return
         if self._coverage_busy:
@@ -3502,6 +3661,8 @@ class ThumbSheet(Gtk.Window):
             base = "No se pudo abrir: %s" % doc.error
         elif doc.info is None:
             base = "Analizando…"
+        elif doc.gen_error:
+            base = "No se pudieron sacar fotogramas: %s" % doc.gen_error
         else:
             base = "%d capturas · %s · %dx%d" % (len(plan_timestamps(doc.info.duration, self.current_interval())),
                                                  fmt_time(doc.info.duration), doc.info.width, doc.info.height)

@@ -17,7 +17,8 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   a su original, estén donde estén. A la derecha de la tercera línea, un icono de cuatro cuadritos
   indica qué parte de sus miniaturas para el intervalo actual está ya en caché, por cuartos: cada
   cuadrito negro son 25 %; los que faltan se ven en gris claro mientras se generan, y si no hay nada en
-  caché ni se está generando no aparece nada. Clic en una fila para ver su sábana. Cuando el vídeo a la vista termina de generarse, los demás
+  caché ni se está generando no aparece nada. Un aspa roja en su lugar significa que el vídeo no se puede
+  abrir o no da fotogramas (el motivo, en el tooltip). Clic en una fila para ver su sábana. Cuando el vídeo a la vista termina de generarse, los demás
   se van generando **en segundo plano** al mismo intervalo, de uno en uno, pero sólo mientras no haya
   otra operación en marcha: generación del vídeo a la vista, corte, vista ampliada, sondeo de ficheros
   recién añadidos o borrado. Si empieza una, la de segundo plano se para (lo hecho queda en caché) y se
@@ -44,6 +45,13 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   vuelve a intentar; para reintentar, borra la caché de ese vídeo. En modo tramos, lo que un tramo no
   produce se reintenta una a una con seek antes de darlo por imposible, para que una zona dañada no
   arrastre a las teselas sanas de su tramo.
+- **Vídeos que no se pueden reproducir**: si ffprobe no puede abrir un fichero (no es un vídeo, no tiene
+  pista de vídeo, está cortado antes de la cabecera…) la fila lo dice y lleva un aspa roja; el resto de
+  la lista sigue. Si ffprobe lo acepta pero ffmpeg no saca ningún fotograma (códec sin soporte, datos
+  dañados de principio a fin), tras unas pocas capturas fallidas se comprueba una en mitad del vídeo y,
+  si tampoco sale, se desiste: aspa roja en la fila, aviso rojo si estaba a la vista, y el segundo plano
+  pasa al siguiente en vez de intentar una a una las cientos que quedan. No se deja anotado nada en la
+  caché, por si fue algo pasajero (una carpeta remota caída): basta abrir ese vídeo para reintentarlo.
 - **Selección**: clic = alternar una tesela; clic y arrastrar = aplicar a un rango contiguo;
   `Shift`+clic = seleccionar todo entre la última tesela pulsada y esta (o desde el principio si aún no
   se había pulsado ninguna); doble clic sobre una

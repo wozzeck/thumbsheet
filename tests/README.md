@@ -16,6 +16,15 @@
   (`on_aspect`) y que quedan apuntadas en `aspects.json`.
 - `test_delete.py <vídeo>` — sin ventana: `remove_with_retry` reintenta ante «ocupado» y `Generator.quiesce`
   deja sin ffmpeg vivos a un vídeo cancelado antes de borrarlo (carpetas remotas: sftp por gvfs, sshfs).
+- `test_errors.py <vídeo mp4 faststart>` — sin ventana. Vídeos irreproducibles: un fichero de texto con
+  extensión .mp4 (mensaje de una línea), `ensure_info` que no deja escapar excepciones, una copia con los
+  datos a ceros (ffprobe la acepta; el generador desiste en segundos sin dejar marcas, en seek y en tramos,
+  y reintenta en la siguiente pasada), un vídeo dañado sólo al principio (no desiste) y la carrera con la
+  GPU (fallo en los últimos tramos con la CPU ya terminada: el generador tiene que acabar igualmente).
+- `gui_errors.sh <vídeo A corto> <vídeo L mp4 faststart> [out]` — Xvfb propio (`:76`). Abre A, una copia de
+  L con los datos a ceros, un texto con extensión .mp4 y otra copia de A: aspa roja en los dos rotos, el
+  segundo plano pasa de largo y genera la última copia, sin marcas `.fail`; al pinchar en el vídeo a ceros
+  se reintenta, vuelve a error con toast rojo y la cola no se queda esperando.
 - `gui_smoke.sh <vídeo A> <vídeo B> [out]` — abre la app en un Xvfb propio (no toca tu pantalla) con
   COPIAS de A y de B (las dos se borran durante la prueba; los originales no se tocan), y con xdotool: rueda sobre el slider de intervalo, clic y arrastre de
   teselas, botón LLC (verifica el proyecto), Cortar, cambio de vídeo, Escape, Cortar y borrar original

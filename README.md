@@ -16,8 +16,8 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   directorio (con `~` por el home) y duración y resolución; los recortes de cada vídeo se guardan junto
   a su original, estén donde estén. A la derecha de la tercera línea, un icono de cuatro cuadritos
   indica qué parte de sus miniaturas para el intervalo actual está ya en caché, por cuartos: cada
-  cuadrito sólido son 25 %; los que faltan van traslúcidos mientras se generan y casi invisibles si
-  no. Clic en una fila para ver su sábana. Cuando el vídeo a la vista termina de generarse, los demás
+  cuadrito negro son 25 %; los que faltan se ven en gris claro mientras se generan, y si no hay nada en
+  caché ni se está generando no aparece nada. Clic en una fila para ver su sábana. Cuando el vídeo a la vista termina de generarse, los demás
   se van generando **en segundo plano** al mismo intervalo, de uno en uno, pero sólo mientras no haya
   otra operación en marcha: generación del vídeo a la vista, corte, vista ampliada, sondeo de ficheros
   recién añadidos o borrado. Si empieza una, la de segundo plano se para (lo hecho queda en caché) y se
@@ -91,7 +91,9 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   el proyecto LLC; × quita el tramo; clic lleva el mosaico a ese instante. El orden se guarda con la
   selección y sobrevive a los retoques de los tramos.
 - **Eliminar**: borra el archivo de vídeo del disco directamente, sin papelera, tras confirmar (Intro
-  acepta, Esc cancela). El borrado
+  acepta, Esc cancela). Antes de borrar espera a que terminen los ffmpeg que tuvieran el vídeo abierto y
+  reintenta unos segundos si el sistema contesta «ocupado» o «permiso denegado»: en una carpeta remota
+  (sftp por gvfs, sshfs) borrar un fichero abierto falla a veces por eso. El borrado
   (el fichero y su caché de miniaturas, que pueden ser miles) va en segundo plano: el diálogo se cierra al
   momento, la fila queda como "Eliminando…" y se pasa al siguiente vídeo; al terminar sale el toast y la
   fila desaparece.

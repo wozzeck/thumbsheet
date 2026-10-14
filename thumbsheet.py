@@ -16,6 +16,7 @@ Pensado para máquinas modestas:
 """
 import collections
 import ctypes
+import errno
 import hashlib
 import bisect
 import json
@@ -30,6 +31,7 @@ import subprocess
 import sys
 import threading
 import time
+import weakref
 
 import gi
 
@@ -39,7 +41,7 @@ gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("Pango", "1.0")
 gi.require_version("PangoCairo", "1.0")
 import cairo  # noqa: E402
-from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Pango, PangoCairo  # noqa: E402
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk, Pango, PangoCairo  # noqa: E402
 
 try:   # reproducción en la vista ampliada (opcional): gir1.2-gstreamer-1.0 + gstreamer1.0-gtk3 + gstreamer1.0-libav
     gi.require_version("Gst", "1.0")
@@ -299,7 +301,12 @@ class VideoInfo(object):
 
     def _probe(self):
         cmd = ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(self.path)]
-        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=FF_ENV)
+        try:
+            # en una ubicación remota lenta el sondeo puede tardar bastante; el tope evita que una conexión muerta
+            # deje la cola de sondeo (y con ella el segundo plano) parada para siempre
+            r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=FF_ENV, timeout=600)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError("ffprobe no responde (¿ubicación remota caída?)")
         if r.returncode != 0:
             raise RuntimeError(r.stderr.decode("utf-8", "replace").strip() or "ffprobe falló")
         data = json.loads(r.stdout.decode("utf-8", "replace") or "{}")
@@ -494,6 +501,39 @@ def plan_timestamps(duration, interval):
     return out
 
 
+_RETRY_ERRNOS = {errno.EBUSY, errno.ETXTBSY, errno.EAGAIN, errno.EACCES, errno.EPERM}
+
+
+def remove_with_retry(path, timeout):
+    """os.remove reintentando durante `timeout` s si el fallo puede ser pasajero: un proceso que aún tiene el fichero
+    abierto y está terminando. En un montaje FUSE (sftp por gvfs, sshfs) borrar un fichero abierto se resuelve
+    renombrándolo a .fuse_hidden… y, si el servidor no lo permite, el borrado falla con «recurso ocupado»; un
+    servidor Windows contesta «permiso denegado» mientras alguien lo tiene abierto. Devuelve None si se borró (o ya
+    no existía) o el texto del error."""
+    path = pathlib.Path(path)
+    deadline = time.monotonic() + timeout
+    delay, first = 0.1, None
+    while True:
+        try:
+            os.remove(str(path))
+            if first is not None:
+                log("borrar: %s borrado tras reintentar %.1f s" % (path.name, time.monotonic() - first))
+            return None
+        except FileNotFoundError:
+            return None
+        except OSError as e:
+            if e.errno not in _RETRY_ERRNOS or time.monotonic() >= deadline:
+                hint = ""
+                if e.errno in (errno.EBUSY, errno.ETXTBSY):
+                    hint = "\nEl archivo sigue abierto en otro programa (un montaje remoto no deja borrarlo mientras tanto)."
+                return "%s\n%s%s" % (path, e, hint)
+            if first is None:
+                first = time.monotonic()
+                log("borrar: %s: %s; reintentando" % (path.name, e.strerror))
+            time.sleep(delay)
+            delay = min(1.0, delay * 2)
+
+
 def doc_complete(doc, interval):
     """¿Están ya en caché todas las capturas de este vídeo para este intervalo?"""
     if doc.info is None or doc.cache_dir is None:
@@ -511,9 +551,11 @@ class Generator(object):
     y al final lo que quedó atrás. Sólo cambia el orden, no el trabajo."""
 
     GPU_WORKERS = 2
+    _live = weakref.WeakSet()   # generadores con hilos o ffmpeg vivos (quiesce: esperar antes de borrar su vídeo)
 
     def __init__(self, info, cache_dir, interval, on_tile, on_progress, on_done, on_failed=None, focus_fn=None,
                  on_aspect=None, on_tiles=None):
+        Generator._live.add(self)
         self.info = info
         self.cache_dir = cache_dir
         self.S = snap_interval(interval)
@@ -606,6 +648,30 @@ class Generator(object):
             th = threading.Thread(target=self._gpu_bootstrap, args=(dev,), name="ts-gpu", daemon=True)
             th.start()
             self.threads.append(th)
+
+    def wait_procs(self, timeout):
+        """Espera (como mucho `timeout` s) a que no quede ningún ffmpeg de este generador; True si no queda ninguno.
+        Para llamar fuera del hilo de la interfaz."""
+        deadline = time.monotonic() + timeout
+        while True:
+            with self.lock:
+                alive = [p for p in self.procs if p.returncode is None and p.poll() is None]
+            if not alive:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.05)
+
+    @classmethod
+    def quiesce(cls, path, timeout=6.0):
+        """Espera a que ningún generador de `path` (cancelado o no) tenga ffmpeg vivos: antes de borrar un vídeo
+        nadie debe tenerlo abierto (ver remove_with_retry). True si se consiguió dentro del plazo."""
+        deadline = time.monotonic() + timeout
+        ok = True
+        for gen in list(cls._live):
+            if gen.info.path == path:
+                ok = gen.wait_procs(max(0.0, deadline - time.monotonic())) and ok
+        return ok
 
     def cancel(self):
         self.cancelled.set()
@@ -750,6 +816,11 @@ class Generator(object):
         p.ts_stderr_path = stderr_path
         with self.lock:
             self.procs.add(p)
+        if self.cancelled.is_set():   # cancelado entre la comprobación de arriba y el registro: que no se escape
+            try:
+                p.terminate()
+            except OSError:
+                pass
         return p
 
     def _wait(self, p):
@@ -2452,8 +2523,9 @@ def short_dir(path):
 
 class StateIcon(Gtk.DrawingArea):
     """Icono de cada fila del panel: cuatro cuadritos = cuartos de las miniaturas del vídeo que ya están en
-    caché para el intervalo actual (sólidos); los que faltan van traslúcidos si se está generando y casi
-    invisibles si no. Sólo se repinta cuando cambia de cuarto, no por cada captura."""
+    caché para el intervalo actual (negros); los que faltan sólo se pintan, en gris claro, mientras se está
+    generando. Sin nada en caché y sin generar no se pinta nada. Sólo se repinta cuando cambia de cuarto, no por
+    cada captura."""
     SIZE = 11
 
     def __init__(self):
@@ -2463,7 +2535,6 @@ class StateIcon(Gtk.DrawingArea):
         self.set_size_request(self.SIZE, self.SIZE)
         self.set_valign(Gtk.Align.CENTER)
         self.set_tooltip_text(self.describe())
-        self.get_style_context().add_class("dim-label")
         self.connect("draw", self.on_draw)
 
     def set_progress(self, done, total, working):
@@ -2502,9 +2573,13 @@ class StateIcon(Gtk.DrawingArea):
         c = self.get_style_context().get_color(self.get_state_flags())
         s, g = float(self.SIZE), 1.5
         q = (s - g) / 2.0   # cuatro cuadritos: un mosaico en miniatura, que se va completando por cuartos
-        rest = 0.45 if self.working else 0.18
         for i, (x, y) in enumerate(((0, 0), (q + g, 0), (0, q + g), (q + g, q + g))):
-            cr.set_source_rgba(c.red, c.green, c.blue, c.alpha * (1.0 if i < self.quarters else rest))
+            if i < self.quarters:
+                cr.set_source_rgba(c.red, c.green, c.blue, c.alpha)          # hecho: color del texto (negro)
+            elif self.working:
+                cr.set_source_rgba(c.red, c.green, c.blue, c.alpha * 0.18)   # por hacer y generándose: gris claro
+            else:
+                continue                                                     # por hacer y parado: nada
             cr.rectangle(x, y, q, q)
             cr.fill()
         return False
@@ -4096,11 +4171,11 @@ class ThumbSheet(Gtk.Window):
         err_text = err_text or "No se pudo eliminar el archivo"
 
         def work():
-            err = None
-            try:
-                os.remove(str(doc.path))
-            except OSError as e:
-                err = "%s\n%s" % (doc.path, e)
+            # que ningún ffmpeg nuestro tenga el vídeo abierto al borrarlo (ya tienen el SIGTERM; aquí sólo se espera):
+            # en un montaje remoto (sftp/sshfs) borrar un fichero abierto puede fallar con «recurso ocupado»
+            if not Generator.quiesce(doc.path, 6.0):
+                log("borrar: %s: algún ffmpeg no ha terminado a tiempo" % doc.path.name)
+            err = remove_with_retry(doc.path, 8.0)
             if err is None and doc.cache_dir:
                 shutil.rmtree(str(doc.cache_dir), ignore_errors=True)
             GLib.idle_add(self._delete_done, doc, err, ok_text, err_text, ok_log)
@@ -4281,7 +4356,10 @@ class ThumbSheet(Gtk.Window):
             try:
                 paths.append(GLib.filename_from_uri(uri)[0])
             except GLib.Error:
-                pass
+                # sftp://, smb://… desde el gestor de archivos: su ruta local vía gvfs (/run/user/…/gvfs/…), si está montado
+                local = Gio.File.new_for_uri(uri).get_path()
+                if local:
+                    paths.append(local)
         self.add_paths(paths)
         Gtk.drag_finish(context, bool(paths), False, time_)
 

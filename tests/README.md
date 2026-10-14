@@ -14,6 +14,8 @@
   vertical y vuelve (concat de un clip y su transpuesto) y comprueba, en modo seek y en modo tramos, que
   cada miniatura sale con su proporción real sin bandas, que el generador avisa de las verticales
   (`on_aspect`) y que quedan apuntadas en `aspects.json`.
+- `test_delete.py <vídeo>` — sin ventana: `remove_with_retry` reintenta ante «ocupado» y `Generator.quiesce`
+  deja sin ffmpeg vivos a un vídeo cancelado antes de borrarlo (carpetas remotas: sftp por gvfs, sshfs).
 - `gui_smoke.sh <vídeo A> <vídeo B> [out]` — abre la app en un Xvfb propio (no toca tu pantalla) con
   COPIAS de A y de B (las dos se borran durante la prueba; los originales no se tocan), y con xdotool: rueda sobre el slider de intervalo, clic y arrastre de
   teselas, botón LLC (verifica el proyecto), Cortar, cambio de vídeo, Escape, Cortar y borrar original

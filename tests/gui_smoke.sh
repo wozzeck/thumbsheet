@@ -203,12 +203,12 @@ sleep 2; shot 10b-tras-cortar-borrar 0.5
 grep -q "archivos: 1" "$OUT/app.log" && ok "cabecera del panel: 1 archivo tras cortar y borrar" || ko "cabecera no bajó a 1: $(grep -o 'archivos: [0-9]*' "$OUT/app.log" | tail -1)"
 sleep 1.5; grep -q "segundo plano: $(basename "$CUT")\|vídeo: $(basename "$CUT")\|estado: $(basename "$CUT")" "$OUT/app.log" && ko "el cortado se añadió al panel" || ok "los cortados no se añaden al panel (ninguno de los dos)"
 
-# 11. Eliminar con confirmación (Alt+E en el diálogo) sobre el vídeo a la vista: la copia de B (la lista
+# 11. Eliminar con confirmación (Intro acepta en el diálogo) sobre el vídeo a la vista: la copia de B (la lista
 #     queda vacía). Sólo se pulsa si lo que está a la vista es efectivamente la copia.
 if [[ "$(shown)" == "$(basename "$VIDEO_B")" ]]; then
   xdotool mousemove $((X+DX)) $((Y+DY)) click 1; shot 10-dialogo-eliminar 1
-  xdotool key alt+e; sleep 1.2
-  [[ ! -f "$VIDEO_B" ]] && ok "archivo eliminado del disco (copia de B); la lista queda vacía" || ko "el archivo sigue existiendo"
+  xdotool key Return; sleep 1.2
+  [[ ! -f "$VIDEO_B" ]] && ok "Intro acepta el diálogo: archivo eliminado del disco (copia de B); la lista queda vacía" || ko "Intro no eliminó: el archivo sigue existiendo"
 else ko "Eliminar omitido: a la vista está '$(shown)', no la copia de B"; fi
 [[ -f "$VIDEO_B_ORIG" && -f "$VIDEO_A" ]] || { echo "¡¡un vídeo ORIGINAL ha desaparecido!!"; fail=1; }
 grep -q "toast ok: Eliminado" "$OUT/app.log" && ok "toast verde al eliminar" || ko "sin toast ok al eliminar"

@@ -90,7 +90,8 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   hay y cuánto suman. Arrastra una tarjeta por su asa para cambiar el orden, que es el que usan Cortar y
   el proyecto LLC; × quita el tramo; clic lleva el mosaico a ese instante. El orden se guarda con la
   selección y sobrevive a los retoques de los tramos.
-- **Eliminar**: borra el archivo de vídeo del disco directamente, sin papelera, tras confirmar. El borrado
+- **Eliminar**: borra el archivo de vídeo del disco directamente, sin papelera, tras confirmar (Intro
+  acepta, Esc cancela). El borrado
   (el fichero y su caché de miniaturas, que pueden ser miles) va en segundo plano: el diálogo se cierra al
   momento, la fila queda como "Eliminando…" y se pasa al siguiente vídeo; al terminar sale el toast y la
   fila desaparece.

@@ -4061,7 +4061,10 @@ class ThumbSheet(Gtk.Window):
         dlg.add_button("_Cancelar", Gtk.ResponseType.CANCEL)
         btn = dlg.add_button("_Eliminar", Gtk.ResponseType.ACCEPT)
         btn.get_style_context().add_class("destructive-action")
-        dlg.set_default_response(Gtk.ResponseType.CANCEL)
+        # Intro acepta: además de la respuesta por defecto, el foco inicial va a «Eliminar» (GTK lo pondría en
+        # el primer botón, «Cancelar», y Intro activa el botón con foco, no el de por defecto). Esc cancela.
+        dlg.set_default_response(Gtk.ResponseType.ACCEPT)
+        btn.grab_focus()
         resp = dlg.run()
         dlg.destroy()
         if resp != Gtk.ResponseType.ACCEPT:

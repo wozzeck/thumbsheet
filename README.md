@@ -13,7 +13,7 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
 
 - **Varios vídeos**: se listan en el panel izquierdo, con una cabecera que dice cuántos hay y un botón
   `+` para añadir más (también `Ctrl+O` o arrastrándolos a la ventana). Cada fila muestra el nombre, el
-  directorio (con `~` por el home) y duración y resolución; los recortes de cada vídeo se guardan junto
+  directorio (con `~` por el home) y duración, resolución y tamaño; los recortes de cada vídeo se guardan junto
   a su original, estén donde estén. A la derecha de la tercera línea, un icono de cuatro cuadritos
   indica qué parte de sus miniaturas para el intervalo actual está ya en caché, por cuartos: cada
   cuadrito negro son 25 %; los que faltan se ven en gris claro mientras se generan, y si no hay nada en
@@ -96,8 +96,11 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
 - **Panel de segmentos** (derecha, plegable con el botón **Segmentos**): los tramos seleccionados en su
   orden de corte, cada uno con su primer y último fotograma, inicio y duración; la cabecera dice cuántos
   hay y cuánto suman. Arrastra una tarjeta por su asa para cambiar el orden, que es el que usan Cortar y
-  el proyecto LLC; × quita el tramo; clic lleva el mosaico a ese instante. El orden se guarda con la
-  selección y sobrevive a los retoques de los tramos.
+  el proyecto LLC: mientras arrastras, las demás se apartan y la tarjeta queda atenuada en el sitio donde
+  va a caer (mitad superior de otra = delante de ella, mitad inferior = detrás; el hueco bajo la última =
+  al final); al soltar se guarda ese orden, y Esc o soltar fuera lo deja como estaba. × quita el tramo;
+  clic lleva el mosaico a ese instante. El orden se guarda con la selección y sobrevive a los retoques de
+  los tramos.
 - **Eliminar**: borra el archivo de vídeo del disco directamente, sin papelera, tras confirmar (Intro
   acepta, Esc cancela). Antes de borrar espera a que terminen los ffmpeg que tuvieran el vídeo abierto y
   reintenta unos segundos si el sistema contesta «ocupado» o «permiso denegado»: en una carpeta remota

@@ -2744,8 +2744,19 @@ class SegPanel(Gtk.Box):
         self.listbox.set_selection_mode(Gtk.SelectionMode.NONE)
         self.listbox.get_style_context().add_class("ts-files")
         self.listbox.connect("row-activated", lambda lb, row: self.on_goto(row.seg[0]))
+        # el orden de las filas sale de `row.order`: al arrastrar se reasigna y `invalidate_sort` las recoloca
+        # sin sacar ninguna del ListBox (sacar la fila que se arrastra cortaría el arrastre)
+        self.listbox.set_sort_func(lambda a, b: a.order - b.order)
         sw.add(self.listbox)
+        # el hueco bajo la última tarjeta también acepta soltar (si no, soltar ahí cancelaría el reorden ya visible)
+        sw.drag_dest_set(Gtk.DestDefaults.MOTION | Gtk.DestDefaults.DROP, self.TARGETS, Gdk.DragAction.MOVE)
+        sw.connect("drag-motion", self._drag_motion_bg)
+        sw.connect("drag-data-received", self._drag_received)
+        self.sw = sw
         self.pack_start(sw, True, True, 0)
+        self._drag_row = None     # tarjeta que se está arrastrando (las demás se apartan en vivo)
+        self._drag_orig = None    # filas en el orden de partida, por si se cancela
+        self._dropped = False
         self._pix = {}            # (caché, t) -> pixbuf a tamaño de tarjeta
         self._wanted = set()      # instantes sin miniatura aún (se completan cuando el generador las saque)
         self._params = None
@@ -2770,6 +2781,8 @@ class SegPanel(Gtk.Box):
             self.refresh(*self._params, force=True)
 
     def _rebuild(self):
+        if self._drag_row is not None:    # mientras se arrastra no se recrean las filas: se reintenta en 120 ms
+            return True
         self._id = None
         doc, segs, ts, S, dur = self._params if self._params else (None, [], [], 1, 0.0)
         sig = (id(doc), tuple(segs))
@@ -2787,7 +2800,8 @@ class SegPanel(Gtk.Box):
             self.listbox.add(self._make_row(doc, k, a, b, ts, S))
         self.listbox.show_all()
         if DEBUG:
-            GLib.idle_add(self._log_geometry)
+            self._geom_tries = 0
+            GLib.timeout_add(60, self._log_geometry)
         return False
 
     def _thumb(self, doc, t):
@@ -2811,6 +2825,7 @@ class SegPanel(Gtk.Box):
     def _make_row(self, doc, k, a, b, ts, S):
         row = Gtk.ListBoxRow()
         row.seg = (a, b)
+        row.order = k
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
         box.set_margin_start(4)
         box.set_margin_end(2)
@@ -2824,7 +2839,9 @@ class SegPanel(Gtk.Box):
         handle.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, self.TARGETS, Gdk.DragAction.MOVE)
         handle.connect("drag-begin", self._drag_begin)
         handle.connect("drag-data-get", self._drag_data_get)
-        row.drag_dest_set(Gtk.DestDefaults.ALL, self.TARGETS, Gdk.DragAction.MOVE)
+        handle.connect("drag-end", self._drag_end)
+        row.drag_dest_set(Gtk.DestDefaults.MOTION | Gtk.DestDefaults.DROP, self.TARGETS, Gdk.DragAction.MOVE)
+        row.connect("drag-motion", self._drag_motion)
         row.connect("drag-data-received", self._drag_received)
         box.pack_start(handle, False, False, 0)
         tiles = [t for t in ts if t < b and t + S > a]
@@ -2861,41 +2878,95 @@ class SegPanel(Gtk.Box):
         return row
 
     # --- arrastrar y soltar para reordenar ---
+    # La tarjeta arrastrada se queda en la lista, atenuada, y va cambiando de sitio según dónde esté el cursor
+    # (mitad superior de una tarjeta = delante de ella, inferior = detrás), así se ve dónde va a quedar. Al
+    # soltar se guarda el orden que se ve; si se cancela (Esc, soltar fuera) vuelve al de partida.
     def _drag_begin(self, handle, context):
         row = handle.get_ancestor(Gtk.ListBoxRow)
         alloc = row.get_allocation()
         surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, max(1, alloc.width), max(1, alloc.height))
         row.draw(cairo.Context(surface))
+        ha = handle.get_allocation()
+        pt = handle.translate_coordinates(row, ha.width // 2, ha.height // 2)   # el asa queda bajo el cursor
+        if pt:
+            surface.set_device_offset(-pt[0], -pt[1])
         Gtk.drag_set_icon_surface(context, surface)
+        self._drag_row = row
+        self._drag_orig = sorted(self.listbox.get_children(), key=lambda r: r.order)
+        self._dropped = False
+        row.get_style_context().add_class("ts-dragging")
 
     def _drag_data_get(self, handle, context, data, info, time):
         idx = handle.get_ancestor(Gtk.ListBoxRow).get_index()
         data.set(data.get_target(), 8, str(idx).encode("ascii"))
 
-    def _drag_received(self, row, context, x, y, data, info, time):
-        try:
-            src = int(bytes(data.get_data()).decode("ascii"))
-        except (TypeError, ValueError):
+    def _place(self, dst):
+        """Coloca la tarjeta arrastrada en la posición dst (contando sin ella)."""
+        rows = sorted(self.listbox.get_children(), key=lambda r: r.order)
+        if self._drag_row not in rows:
             return
-        dst = row.get_index()
-        if y > row.get_allocation().height / 2.0:
-            dst += 1
-        if src < dst:
+        cur = rows.index(self._drag_row)
+        dst = max(0, min(len(rows) - 1, dst))
+        if dst == cur:
+            return
+        rows.insert(dst, rows.pop(cur))
+        for k, r in enumerate(rows):
+            r.order = k
+        self.listbox.invalidate_sort()
+        if DEBUG:
+            log("segdrag: posición %d de %d" % (dst + 1, len(rows)))
+
+    def _drag_motion(self, row, context, x, y, time):
+        if self._drag_row is None:
+            return False
+        a = row.get_allocation()
+        dst = row.get_index() + (1 if y > a.height / 2.0 else 0)
+        if self._drag_row.get_index() < dst:
             dst -= 1
-        if src == dst or not (0 <= src < len(self._segs)):
+        self._place(dst)
+        self.sw.get_vadjustment().clamp_page(a.y, a.y + a.height)   # una tarjeta a medio ver se descubre entera
+        return True
+
+    def _drag_motion_bg(self, sw, context, x, y, time):
+        if self._drag_row is None:
+            return False
+        pt = sw.translate_coordinates(self.listbox, x, y)
+        row = self.listbox.get_row_at_y(pt[1]) if pt else None
+        if row is not None:
+            return self._drag_motion(row, context, x, pt[1] - row.get_allocation().y, time)
+        self._place(len(self.listbox.get_children()) if pt and pt[1] > 0 else 0)
+        return True
+
+    def _drag_received(self, widget, context, x, y, data, info, time):
+        if self._drag_row is None:
             return
-        segs = list(self._segs)
-        segs.insert(dst, segs.pop(src))
-        self.on_reorder(segs)
+        self._dropped = True
+        segs = [r.seg for r in sorted(self.listbox.get_children(), key=lambda r: r.order)]
+        if segs != self._segs:
+            self.on_reorder(segs)
+
+    def _drag_end(self, handle, context):
+        row, orig = self._drag_row, self._drag_orig
+        self._drag_row = self._drag_orig = None
+        if row is None:
+            return
+        row.get_style_context().remove_class("ts-dragging")
+        if not self._dropped and orig:
+            for k, r in enumerate(orig):
+                r.order = k
+            self.listbox.invalidate_sort()
 
     def _log_geometry(self):
         top = self.get_toplevel()
+        rows = self.listbox.get_children()
+        if any(r.get_allocation().width <= 1 for r in rows) and self._geom_tries < 20:
+            self._geom_tries += 1      # GTK coloca las filas en la fase de layout del siguiente fotograma: esperar
+            return True
 
         def center(w):
             a = w.get_allocation()
             pt = w.translate_coordinates(top, 0, 0)
             return "%d,%d" % (pt[-2] + a.width // 2, pt[-1] + a.height // 2) if pt else "?"
-        rows = self.listbox.get_children()
         log("segpanel: %s · rows=%s · dels=%s" % (self.header.get_text(), ";".join(center(r.handle) for r in rows),
                                                  ";".join(center(r.close) for r in rows)))
         return False
@@ -2961,7 +3032,8 @@ class Document(object):
             return "no se pudo abrir"
         if not self.info:
             return "analizando…"
-        return "%s · %dx%d" % (fmt_time(self.info.duration), self.info.width, self.info.height)
+        return "%s · %dx%d · %s" % (fmt_time(self.info.duration), self.info.width, self.info.height,
+                                    human_size(self.info.size))
 
 
 # ----------------------------------------------------------------------------------------------
@@ -3309,6 +3381,7 @@ class ThumbSheet(Gtk.Window):
         sub = Gtk.Label()
         sub.set_xalign(0.0)
         sub.get_style_context().add_class("dim-label")
+        sub.set_ellipsize(Pango.EllipsizeMode.END)   # que una línea larga nunca fuerce el ancho del panel
         sub.set_markup(sub_markup(doc.subtitle))
         state = StateIcon()
         line3 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
@@ -4580,6 +4653,7 @@ def main(argv):
         .ts-sheet-scroll scrollbar.vertical slider { min-width: 16px; min-height: 56px; border-radius: 10px; }
         .ts-sheet-scroll scrollbar.vertical { background-color: #1c1c1f; border: none; }   /* sin la raya clara de Adwaita */
         .ts-files row { padding: 1px 0; }
+        .ts-files row.ts-dragging { opacity: 0.3; }   /* hueco de la tarjeta arrastrada */
         .ts-panel-header { padding: 1px 2px 1px 8px; background-color: alpha(@theme_fg_color, 0.06);
                            border-bottom: 1px solid alpha(@theme_fg_color, 0.15); }
         scale marks { color: alpha(currentColor, 0.8); }

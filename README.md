@@ -155,6 +155,11 @@ GStreamer ≥ 1.22 el plugin `va` lo hace solo.)
   una captura de 0,1 s de trabajo real costaba 1,5 s de CPU (medido con `strace -c`: 20.000
   `sched_yield`). Con la variable, 0,13 s. No cambia el tiempo de reloj de una captura suelta, pero
   deja de calentar el equipo y de pisar a los demás workers.
+- **Relleno de la sábana al hacer scroll**: un hilo decodifica las miniaturas visibles al tamaño de la tesela
+  (último pedido primero, de arriba abajo) y sólo después precarga una pantalla por delante y por detrás; lo
+  que está a la vista y el margen se calculan desde el visor real, no desde el recorte de cada repintado, para
+  que al pintar una tesela recién llegada no se descarten las demás pendientes. `tests/bench_scrollfill.sh`
+  mide cuánto tarda en completarse la pantalla tras un salto grande (unos 100 ms con 300 teselas a la vista).
 - La **resolución de la miniatura no influye** en el tiempo (480 px y 160 px cuestan lo mismo):
   manda decodificar el vídeo a su resolución nativa, que no se puede evitar.
 - **Dos estrategias según el vídeo**, elegidas midiendo el intervalo entre keyframes (GOP) con

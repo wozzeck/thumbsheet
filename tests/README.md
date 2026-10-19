@@ -21,6 +21,12 @@
   datos a ceros (ffprobe la acepta; el generador desiste en segundos sin dejar marcas, en seek y en tramos,
   y reintenta en la siguiente pasada), un vídeo dañado sólo al principio (no desiste) y la carrera con la
   GPU (fallo en los últimos tramos con la CPU ya terminada: el generador tiene que acabar igualmente).
+- `test_loader.py` — sin ventana, instantáneo: el cargador de miniaturas atiende lo visible antes que la precarga
+  (y lo visible de arriba abajo), descarta lo que ya no está a la vista ni en el margen, y una petición visible
+  saca la tesela de la cola de precarga.
+- `bench_scrollfill.sh <vídeo largo> [out]` — banco, no pasa/falla (Xvfb `:74`). Con una sábana de miles de
+  teselas en caché (la primera vez la genera, intervalo 1 s), salta por la barra y mide cuánto tarda en
+  completarse la pantalla (trazas `salto:` / `lleno:`).
 - `gui_errors.sh <vídeo A corto> <vídeo L mp4 faststart> [out]` — Xvfb propio (`:76`). Abre A, una copia de
   L con los datos a ceros, un texto con extensión .mp4 y otra copia de A: aspa roja en los dos rotos, el
   segundo plano pasa de largo y genera la última copia, sin marcas `.fail`; al pinchar en el vídeo a ceros

@@ -1218,8 +1218,9 @@ class PixCache(object):
 
 
 class Loader(object):
-    """Hilo que decodifica miniaturas al tamaño pedido. Atiende primero lo último solicitado (lo que
-    está en pantalla) y descarta lo que ya no se ve."""
+    """Hilo que decodifica miniaturas al tamaño pedido. Dos colas: lo que está en pantalla (se atiende primero,
+    y dentro de ella lo último pedido) y la precarga de fuera de pantalla, que sólo se toca cuando no queda nada
+    visible por sacar. Descarta lo que ya no está ni a la vista ni en el margen de precarga."""
 
     def __init__(self, cache, visible_fn, redraw_fn, aspect_fn=None):
         self.cache = cache
@@ -1227,28 +1228,40 @@ class Loader(object):
         self.redraw_fn = redraw_fn
         self.aspect_fn = aspect_fn        # (t, aspecto) si el JPEG no tiene la proporción de su tesela
         self.cv = threading.Condition()
-        self.queue = collections.OrderedDict()   # t -> (path, width, height)
+        self.queue = collections.OrderedDict()   # t -> (path, width, height): a la vista
+        self.back = collections.OrderedDict()    # precarga fuera de pantalla
         self.redraw_pending = False
         self.loaded = set()                      # cargadas desde el último repintado (sólo se repintan ésas)
         th = threading.Thread(target=self._run, name="ts-loader", daemon=True)
         th.start()
 
-    def request(self, t, path, width, height):
+    def request(self, t, path, width, height, prefetch=False):
         with self.cv:
-            self.queue.pop(t, None)
-            self.queue[t] = (path, width, height)
+            if prefetch:
+                if t in self.queue:
+                    return
+                self.back.pop(t, None)
+                self.back[t] = (path, width, height)
+            else:
+                self.back.pop(t, None)
+                self.queue.pop(t, None)
+                self.queue[t] = (path, width, height)
             self.cv.notify()
 
     def cancel_all(self):
         with self.cv:
             self.queue.clear()
+            self.back.clear()
 
     def _run(self):
         while True:
             with self.cv:
-                while not self.queue:
+                while not self.queue and not self.back:
                     self.cv.wait()
-                t, (path, width, height) = self.queue.popitem(last=True)
+                if self.queue:
+                    t, (path, width, height) = self.queue.popitem(last=True)
+                else:
+                    t, (path, width, height) = self.back.popitem(last=True)
             vis = self.visible_fn()
             if vis is not None and t not in vis:
                 continue
@@ -1329,6 +1342,10 @@ class Sheet(Gtk.DrawingArea):
         self._drag = None
         self._anchor_t = None                 # última tesela pulsada con el botón izquierdo (para Shift+clic)
         self._pending_center = None   # instante a recentrar en cuanto se asigne la nueva altura
+        self._holes = []              # huecos visibles de este dibujado, para pedirlos al cargador de arriba abajo
+        self._prev_visible = None     # para pedir la precarga sólo cuando el visor se ha movido
+        self._fill_core = None        # DEBUG: medir cuánto tarda en completarse la pantalla tras un salto
+        self._fill_t0 = None
         self.connect("draw", self.on_draw)
         self.connect("size-allocate", self._on_size_allocate)
         self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK |
@@ -1797,10 +1814,9 @@ class Sheet(Gtk.DrawingArea):
         r1 = self._row_of_y(y2 - self.PAD)
         i0 = min(len(self.ts), r0 * self.cols)   # un repintado bajo el contenido (toast, vídeo corto) cae más allá
         i1 = min(len(self.ts) - 1, (r1 + 1) * self.cols - 1)
-        # lo visible + una pantalla por delante y por detrás para que el scroll no muestre huecos
-        margin = self.cols * max(1, int(math.ceil((y2 - y1) / float(row_h))))
-        # el foco de generación sale del visor real, no del recorte de este dibujado (que al repintar una sola
-        # tesela es sólo su fila): así sólo cambia al hacer scroll o cambiar el tamaño
+        # lo visible y el margen de precarga salen del VISOR real, no del recorte de este dibujado: al repintar
+        # una sola tesela recién cargada el recorte es sólo su fila, y con él el cargador tomaba por «ya no se ve»
+        # (y descartaba) el resto de la pantalla, que se quedaba en negro hasta otro repintado completo
         vadj = self.vadj
         if vadj is not None and vadj.get_page_size() > 0:
             vy1 = vadj.get_value()
@@ -1810,9 +1826,25 @@ class Sheet(Gtk.DrawingArea):
         vr0 = max(0, self._row_of_y(vy1 - self.PAD))
         vr1 = self._row_of_y(vy2 - self.PAD)
         core = (vr0 * self.cols, min(len(self.ts) - 1, (vr1 + 1) * self.cols - 1))
+        # precarga: una pantalla por delante y por detrás para que el scroll corto no muestre huecos
+        margin = self.cols * max(1, int(math.ceil((vy2 - vy1) / float(row_h))))
         with self.vis_lock:
-            self.visible = (max(0, i0 - margin), min(len(self.ts) - 1, i1 + margin))
+            self.visible = (max(0, core[0] - margin), min(len(self.ts) - 1, core[1] + margin))
             self.visible_core = core
+            vis_changed = self.visible != self._prev_visible
+            self._prev_visible = self.visible
+        if DEBUG:
+            c0, c1 = core
+            holes = sum(1 for i in range(c0, c1 + 1) if self.ts[i] in self.ready and self.cache.get(self.ts[i]) is None)
+            if core != self._fill_core:
+                self._fill_core = core
+                self._fill_t0 = time.perf_counter() if holes else None
+                if holes:
+                    log("salto: núcleo %d-%d, %d huecos" % (c0, c1, holes))
+            elif holes == 0 and self._fill_t0 is not None:
+                log("lleno: %d ms" % (1000 * (time.perf_counter() - self._fill_t0)))
+                self._fill_t0 = None
+        self._holes = []
         # sólo las teselas que tocan los rectángulos sucios de verdad: mientras se genera, las nuevas caen
         # repartidas por la pantalla y la caja envolvente del recorte abarcaba toda la zona visible
         rects = cr.copy_clip_rectangle_list()   # lista de cairo.Rectangle (x, y, width, height)
@@ -1837,12 +1869,20 @@ class Sheet(Gtk.DrawingArea):
             for i in range(i0, i1 + 1):
                 self._draw_tile(cr, i, labels)
         self._draw_labels(cr, labels)
-        # prefetch fuera de pantalla (sin dibujar)
-        for i in list(range(max(0, i0 - margin), i0)) + list(range(i1 + 1, min(len(self.ts), i1 + 1 + margin))):
-            t = self.ts[i]
-            if t in self.ready and self.cache.get(t) is None:
-                _x, _y, pw, ph = self._tile_rect(i)
-                self.loader.request(t, self.cache_dir / ("%d.jpg" % t), pw, ph)
+        # huecos visibles: pedidos en orden inverso para que el cargador (último pedido primero) los saque de
+        # arriba abajo
+        for t, w, h in reversed(self._holes):
+            self.loader.request(t, self.cache_dir / ("%d.jpg" % t), w, h)
+        self._holes = []
+        # precarga fuera de pantalla (sin dibujar), sólo cuando el visor se ha movido: en los repintados parciales
+        # de las teselas que van llegando no hay nada nuevo que pedir
+        if vis_changed:
+            c0, c1 = core
+            for i in list(range(max(0, c0 - margin), c0)) + list(range(c1 + 1, min(len(self.ts), c1 + 1 + margin))):
+                t = self.ts[i]
+                if t in self.ready and self.cache.get(t) is None:
+                    _x, _y, pw, ph = self._tile_rect(i)
+                    self.loader.request(t, self.cache_dir / ("%d.jpg" % t), pw, ph, prefetch=True)
         return False
 
     def _draw_tile(self, cr, i, labels):
@@ -1870,7 +1910,7 @@ class Sheet(Gtk.DrawingArea):
                 cr.line_to(cx - r, cy + r)
                 cr.stroke()
             elif t in self.ready:
-                self.loader.request(t, self.cache_dir / ("%d.jpg" % t), w, h)
+                self._holes.append((t, w, h))
             if DEBUG:
                 _prof("dt_hueco", time.perf_counter() - t0)
                 t0 = time.perf_counter()

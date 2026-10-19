@@ -14,10 +14,10 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
 - **Varios vídeos**: se listan en el panel izquierdo, con una cabecera que dice cuántos hay y un botón
   `+` para añadir más (también `Ctrl+O` o arrastrándolos a la ventana). Cada fila muestra el nombre, el
   directorio (con `~` por el home) y duración, resolución y tamaño; los recortes de cada vídeo se guardan junto
-  a su original, estén donde estén. A la derecha de la tercera línea, un icono de cuatro cuadritos
-  indica qué parte de sus miniaturas para el intervalo actual está ya en caché, por cuartos: cada
-  cuadrito negro son 25 %; los que faltan se ven en gris claro mientras se generan, y si no hay nada en
-  caché ni se está generando no aparece nada. Un aspa roja en su lugar significa que el vídeo no se puede
+  a su original, estén donde estén. A la derecha de la segunda y tercera líneas, un mosaico de
+  4×4 cuadritos indica qué parte de sus miniaturas para el intervalo actual está ya en caché, por
+  dieciseisavos: los cuadritos negros se van llenando de arriba abajo; los que faltan se ven en gris claro
+  mientras se generan, y si no hay nada en caché ni se está generando no aparece nada. Un aspa roja en su lugar significa que el vídeo no se puede
   abrir o no da fotogramas (el motivo, en el tooltip). Clic en una fila para ver su sábana. Cuando el vídeo a la vista termina de generarse, los demás
   se van generando **en segundo plano** al mismo intervalo, de uno en uno, pero sólo mientras no haya
   otra operación en marcha: generación del vídeo a la vista, corte, vista ampliada, sondeo de ficheros

@@ -2669,32 +2669,37 @@ def short_dir(path):
 
 
 class StateIcon(Gtk.DrawingArea):
-    """Icono de cada fila del panel: cuatro cuadritos = cuartos de las miniaturas del vídeo que ya están en
-    caché para el intervalo actual (negros); los que faltan sólo se pintan, en gris claro, mientras se está
-    generando. Sin nada en caché y sin generar no se pinta nada. Aspa roja si el vídeo no se puede abrir o no da
-    ningún fotograma (el texto del error va en el tooltip). Sólo se repinta cuando cambia de cuarto, no por cada
-    captura."""
-    SIZE = 11
+    """Icono de cada fila del panel, a la derecha de las líneas 2.ª y 3.ª: un mosaico de 4×4 cuadritos = dieciseisavos
+    de las miniaturas del vídeo que ya están en caché para el intervalo actual (negros, se van llenando de arriba
+    abajo como la sábana); los que faltan sólo se pintan, en gris claro, mientras se está generando. Sin nada en
+    caché y sin generar no se pinta nada. Aspa roja si el vídeo no se puede abrir o no da ningún fotograma (el
+    texto del error va en el tooltip). Sólo se repinta cuando cambia de cuadrito, no por cada captura. Ocupa el
+    alto que le den (el de las dos líneas) y se dibuja cuadrado y centrado."""
+    GRID = 4
+    CELLS = GRID * GRID
+    GAP = 1.0
+    SIZE = 19             # ancho mínimo: 4 cuadritos de 4 px y 3 huecos
 
     def __init__(self):
         super(StateIcon, self).__init__()
-        self.quarters = 0
+        self.quarters = 0     # cuadritos llenos (0..CELLS); el nombre viene de cuando eran cuartos
         self.working = False
         self.error = None
         self.set_size_request(self.SIZE, self.SIZE)
-        self.set_valign(Gtk.Align.CENTER)
+        self.set_valign(Gtk.Align.FILL)
         self.set_tooltip_text(self.describe())
         self.connect("draw", self.on_draw)
 
     def set_progress(self, done, total, working):
         """Devuelve True si cambia lo que se ve."""
+        n = self.CELLS
         if total <= 0:
             q = 0
         elif done >= total:
-            q = 4
+            q = n
         else:
-            q = min(3, int(4 * done / float(total)))
-        working = bool(working) and q < 4
+            q = min(n - 1, int(n * done / float(total)))
+        working = bool(working) and q < n
         if (q, working, None) == (self.quarters, self.working, self.error):
             return False
         self.quarters, self.working, self.error = q, working, None
@@ -2714,8 +2719,8 @@ class StateIcon(Gtk.DrawingArea):
     def describe(self):
         if self.error is not None:
             return self.error
-        pct = self.quarters * 25
-        if self.quarters == 4:
+        pct = int(100 * self.quarters / self.CELLS)
+        if self.quarters == self.CELLS:
             return "Miniaturas generadas"
         if self.working:
             return "Generando miniaturas… (%d %% o más)" % pct
@@ -2724,36 +2729,44 @@ class StateIcon(Gtk.DrawingArea):
     def state_name(self):
         if self.error is not None:
             return "error"
-        pct = self.quarters * 25
-        if self.quarters == 4:
+        pct = int(100 * self.quarters / self.CELLS)
+        if self.quarters == self.CELLS:
             return "listas"
         if self.working:
             return "generando %d %%" % pct
         return "pendientes" if pct == 0 else "%d %%" % pct
 
     def on_draw(self, widget, cr):
-        s, g = float(self.SIZE), 1.5
+        w, h = self.get_allocated_width(), self.get_allocated_height()
+        s = float(min(w, h))                       # cuadrado y centrado en lo asignado
+        cx, cy = w / 2.0, h / 2.0
         if self.error is not None:   # aspa roja, como las teselas sin fotograma del mosaico
-            r = s / 2.0 - 1.0
+            r = min(s / 2.0 - 1.5, 7.0)
             cr.set_source_rgb(0.93, 0.16, 0.16)
-            cr.set_line_width(2.2)
+            cr.set_line_width(2.4)
             cr.set_line_cap(cairo.LINE_CAP_ROUND)
-            cr.move_to(s / 2.0 - r, s / 2.0 - r)
-            cr.line_to(s / 2.0 + r, s / 2.0 + r)
-            cr.move_to(s / 2.0 + r, s / 2.0 - r)
-            cr.line_to(s / 2.0 - r, s / 2.0 + r)
+            cr.move_to(cx - r, cy - r)
+            cr.line_to(cx + r, cy + r)
+            cr.move_to(cx + r, cy - r)
+            cr.line_to(cx - r, cy + r)
             cr.stroke()
             return False
         c = self.get_style_context().get_color(self.get_state_flags())
-        q = (s - g) / 2.0   # cuatro cuadritos: un mosaico en miniatura, que se va completando por cuartos
-        for i, (x, y) in enumerate(((0, 0), (q + g, 0), (0, q + g), (q + g, q + g))):
+        n, g = self.GRID, self.GAP
+        cell = math.floor((s - (n - 1) * g) / n)   # cuadritos de tamaño entero: bordes nítidos
+        if cell < 2:
+            return False
+        span = n * cell + (n - 1) * g
+        ox, oy = math.floor(cx - span / 2.0), math.floor(cy - span / 2.0)
+        for i in range(self.CELLS):
             if i < self.quarters:
                 cr.set_source_rgba(c.red, c.green, c.blue, c.alpha)          # hecho: color del texto (negro)
             elif self.working:
                 cr.set_source_rgba(c.red, c.green, c.blue, c.alpha * 0.18)   # por hacer y generándose: gris claro
             else:
                 continue                                                     # por hacer y parado: nada
-            cr.rectangle(x, y, q, q)
+            r, k = divmod(i, n)                                              # se llena por filas, de arriba abajo
+            cr.rectangle(ox + k * (cell + g), oy + r * (cell + g), cell, cell)
             cr.fill()
         return False
 
@@ -3541,12 +3554,15 @@ class ThumbSheet(Gtk.Window):
         sub.set_ellipsize(Pango.EllipsizeMode.END)   # que una línea larga nunca fuerce el ancho del panel
         sub.set_markup(sub_markup(doc.subtitle))
         state = StateIcon()
-        line3 = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=5)
-        line3.pack_start(sub, True, True, 0)
-        line3.pack_end(state, False, False, 0)
+        # el icono de estado ocupa el alto de las líneas 2.ª y 3.ª, a su derecha
+        lines = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        lines.pack_start(where, False, False, 0)
+        lines.pack_start(sub, False, False, 0)
+        lower = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
+        lower.pack_start(lines, True, True, 0)
+        lower.pack_end(state, False, False, 0)
         box.pack_start(name, False, False, 0)
-        box.pack_start(where, False, False, 0)
-        box.pack_start(line3, False, False, 0)
+        box.pack_start(lower, False, False, 0)
         row.add(box)
         row.sub_label = sub
         row.state = state

@@ -228,5 +228,7 @@ APP=$!
 for i in $(seq 1 24); do n=$({ ls "$SEL"/*/*.jpg 2>/dev/null || true; } | wc -l); [[ "$n" -ge 100 ]] && break; sleep 0.25; done   # en plena generación
 busy=$(pgrep -c -x ffmpeg || true); kill -9 $APP 2>/dev/null; sleep 1.5   # SIGTERM por PDEATHSIG: ffmpeg termina limpio, no instantáneo
 left2=$(pgrep -c -x ffmpeg || true); [[ "$busy" -gt 0 && "$left2" == 0 ]] && ok "SIGKILL en plena generación: $busy ffmpeg → 0" || ko "SIGKILL: antes=$busy después=$left2"
+NG=$(grep -c "estado: $(basename "$COPY") → generando" "$OUT/app2.log" || true)
+[[ "$NG" -ge 5 ]] && ok "el icono de la fila avanza cuadrito a cuadrito ($NG estados «generando» hasta ~35 %)" || ko "el icono de la fila avanza a saltos: sólo $NG estados «generando»"
 echo "--- log"; grep -v "geometry" "$OUT/app.log" | tail -8 | cut -c1-160
 echo "RESULTADO: $([[ $fail == 0 ]] && echo OK || echo FALLO)"; exit $fail

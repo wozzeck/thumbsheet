@@ -3245,7 +3245,7 @@ class ThumbSheet(Gtk.Window):
         self._status_id = None                # refresco agrupado del estado (llega por captura)
         self._coverage_busy = False           # recuento de caché de las filas en marcha (hilo aparte)
         self._coverage_again = False
-        self._quarter = -1                    # cuarto (0-3) del progreso ya reflejado en el icono de la fila
+        self._quarter = -1                    # cuadrito (0-15) del progreso ya reflejado en el icono de la fila
         self.gen_doc = None                   # vídeo que está generando self.generator (actual o 2.º plano)
         self._cut_pct = None
         self._regen_id = None
@@ -3783,8 +3783,8 @@ class ThumbSheet(Gtk.Window):
         self._refresh_status()
         if DEBUG:
             _prof("on_progress", time.perf_counter() - t0)
-        q = int(4 * self._progress[0] / float(total)) if total else 0
-        if q != self._quarter:   # el icono de la fila sólo cambia por cuartos
+        q = int(StateIcon.CELLS * self._progress[0] / float(total)) if total else 0
+        if q != self._quarter:   # el icono de la fila sólo cambia cuando se llena otro cuadrito (dieciseisavo)
             self._quarter = q
             self._refresh_row_states()
         return False

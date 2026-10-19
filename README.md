@@ -95,12 +95,12 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   segundo plano como con Eliminar: el original desaparece del panel y se abre el siguiente de la lista.
 - **Panel de segmentos** (derecha, plegable con el botón **Segmentos**): los tramos seleccionados en su
   orden de corte, cada uno con su primer y último fotograma, inicio y duración; la cabecera dice cuántos
-  hay y cuánto suman. Arrastra una tarjeta por su asa para cambiar el orden, que es el que usan Cortar y
-  el proyecto LLC: mientras arrastras, las demás se apartan y la tarjeta queda atenuada en el sitio donde
-  va a caer (mitad superior de otra = delante de ella, mitad inferior = detrás; el hueco bajo la última =
-  al final); al soltar se guarda ese orden, y Esc o soltar fuera lo deja como estaba. × quita el tramo;
-  clic lleva el mosaico a ese instante. El orden se guarda con la selección y sobrevive a los retoques de
-  los tramos.
+  hay y cuánto suman. Arrastra una tarjeta (por cualquier punto menos la ×) para cambiar el orden, que es
+  el que usan Cortar y el proyecto LLC: mientras arrastras, las demás se deslizan para hacerle hueco y la
+  tarjeta queda atenuada en el sitio donde va a caer (mitad superior de otra = delante de ella, mitad
+  inferior = detrás; el hueco bajo la última = al final); al soltar se guarda ese orden, y Esc o soltar
+  fuera lo deja como estaba. × quita el tramo; clic lleva el mosaico a ese instante. El orden se guarda
+  con la selección y sobrevive a los retoques de los tramos.
 - **Eliminar**: borra el archivo de vídeo del disco directamente, sin papelera, tras confirmar (Intro
   acepta, Esc cancela). Antes de borrar espera a que terminen los ffmpeg que tuvieran el vídeo abierto y
   reintenta unos segundos si el sistema contesta «ocupado» o «permiso denegado»: en una carpeta remota

@@ -26,9 +26,10 @@
   segundo plano pasa de largo y genera la última copia, sin marcas `.fail`; al pinchar en el vídeo a ceros
   se reintenta, vuelve a error con toast rojo y la cola no se queda esperando.
 - `gui_segdrag.sh <vídeo A corto> [out]` — Xvfb propio (`:75`). Reorden en vivo del panel de segmentos: tres
-  tramos sueltos; arrastrar la 3.ª tarjeta hasta la 1.ª (a medio arrastre ya está colocada delante y no se
-  ha guardado nada), soltar; arrastrar la 1.ª al hueco bajo la última; arrastrar y cancelar con Esc. También
-  comprueba que la fila del panel de vídeos acaba con el tamaño del fichero.
+  tramos sueltos; arrastrar la 3.ª tarjeta hasta la 1.ª (a medio arrastre ya está colocada delante, el icono
+  es la tarjeta entera, las demás se han deslizado con animación y no se ha guardado nada), soltar; arrastrar
+  la 1.ª al hueco bajo la última; arrastrar y cancelar con Esc; clic en una tarjeta (ir al instante) y ×.
+  También comprueba que la fila del panel de vídeos acaba con el tamaño del fichero.
 - `gui_smoke.sh <vídeo A> <vídeo B> [out]` — abre la app en un Xvfb propio (no toca tu pantalla) con
   COPIAS de A y de B (las dos se borran durante la prueba; los originales no se tocan), y con xdotool: rueda sobre el slider de intervalo, clic y arrastre de
   teselas, botón LLC (verifica el proyecto), Cortar, cambio de vídeo, Escape, Cortar y borrar original

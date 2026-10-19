@@ -2720,12 +2720,16 @@ class StateIcon(Gtk.DrawingArea):
 
 class SegPanel(Gtk.Box):
     """Panel derecho (plegable): los tramos seleccionados en su orden de corte, cada uno con su primer y último
-    fotograma, inicio y duración. Arrastrar por el asa reordena (el orden lo usan Cortar y LLC); × quita el tramo;
+    fotograma, inicio y duración. Toda la tarjeta (menos ×) se arrastra para reordenar: las demás se deslizan para
+    hacerle hueco y la arrastrada queda atenuada donde va a caer (el orden lo usan Cortar y LLC); × quita el tramo;
     clic en la tarjeta lleva el mosaico a ese instante. Cabecera: cuántos hay y la duración total. Sólo se
     reconstruye cuando cambian los tramos (agrupando lo que llegue en 120 ms) y las miniaturas se decodifican una
-    vez a tamaño de tarjeta."""
+    vez a tamaño de tarjeta. Las tarjetas van en un Gtk.Fixed con la posición vertical animada por tick (un
+    ListBox no puede deslizar sus filas)."""
     THUMB_H = 44
     WIDTH = 280
+    GAP = 2            # separación vertical entre tarjetas
+    ANIM_MS = 180      # deslizamiento de las tarjetas al hacer hueco
     TARGETS = [Gtk.TargetEntry.new("THUMBSHEET_SEGMENT", Gtk.TargetFlags.SAME_APP, 0)]
 
     def __init__(self, on_reorder, on_delete, on_goto):
@@ -2740,29 +2744,28 @@ class SegPanel(Gtk.Box):
         self.pack_start(hb, False, False, 0)
         sw = Gtk.ScrolledWindow()
         sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.listbox = Gtk.ListBox()
-        self.listbox.set_selection_mode(Gtk.SelectionMode.NONE)
-        self.listbox.get_style_context().add_class("ts-files")
-        self.listbox.connect("row-activated", lambda lb, row: self.on_goto(row.seg[0]))
-        # el orden de las filas sale de `row.order`: al arrastrar se reasigna y `invalidate_sort` las recoloca
-        # sin sacar ninguna del ListBox (sacar la fila que se arrastra cortaría el arrastre)
-        self.listbox.set_sort_func(lambda a, b: a.order - b.order)
-        sw.add(self.listbox)
+        self.fixed = Gtk.Fixed()
+        self.fixed.connect("size-allocate", self._fixed_allocated)
+        sw.add(self.fixed)
         # el hueco bajo la última tarjeta también acepta soltar (si no, soltar ahí cancelaría el reorden ya visible)
         sw.drag_dest_set(Gtk.DestDefaults.MOTION | Gtk.DestDefaults.DROP, self.TARGETS, Gdk.DragAction.MOVE)
         sw.connect("drag-motion", self._drag_motion_bg)
         sw.connect("drag-data-received", self._drag_received)
         self.sw = sw
         self.pack_start(sw, True, True, 0)
-        self._drag_row = None     # tarjeta que se está arrastrando (las demás se apartan en vivo)
-        self._drag_orig = None    # filas en el orden de partida, por si se cancela
-        self._dropped = False
+        self.cards = []           # tarjetas en su orden visual (cada una: seg, y, target_y, anim_from, anim_t0)
+        self.pitch = self.THUMB_H + 8
+        self._tick = None         # tick callback de la animación mientras alguna tarjeta no está en su sitio
         self._pix = {}            # (caché, t) -> pixbuf a tamaño de tarjeta
         self._wanted = set()      # instantes sin miniatura aún (se completan cuando el generador las saque)
         self._params = None
         self._sig = None
         self._id = None
         self._segs = []
+        self._drag_card = None    # tarjeta que se está arrastrando (las demás se apartan en vivo)
+        self._drag_orig = None    # tarjetas en el orden de partida, por si se cancela
+        self._dropped = False
+        self._press_card = None   # tarjeta con el botón pulsado y aún sin arrastrar (soltar ahí = clic = ir)
 
     def refresh(self, doc, segs, ts, S, dur, force=False):
         self._params = (doc, list(segs), ts, S, dur)
@@ -2781,7 +2784,7 @@ class SegPanel(Gtk.Box):
             self.refresh(*self._params, force=True)
 
     def _rebuild(self):
-        if self._drag_row is not None:    # mientras se arrastra no se recrean las filas: se reintenta en 120 ms
+        if self._drag_card is not None:   # mientras se arrastra no se recrean las tarjetas: se reintenta en 120 ms
             return True
         self._id = None
         doc, segs, ts, S, dur = self._params if self._params else (None, [], [], 1, 0.0)
@@ -2790,18 +2793,40 @@ class SegPanel(Gtk.Box):
             return False
         self._sig = sig
         self._segs = list(segs)
-        for child in self.listbox.get_children():
-            self.listbox.remove(child)
+        for card in self.cards:
+            self.fixed.remove(card)
+        self.cards = []
         self._wanted = set()
         total = sum(b - a for a, b in segs)
         self.header.set_text("Sin segmentos" if not segs else "%d segmento%s · %s" % (
             len(segs), "" if len(segs) == 1 else "s", fmt_time(total)))
+        width = self.fixed.get_allocated_width()
         for k, (a, b) in enumerate(segs):
-            self.listbox.add(self._make_row(doc, k, a, b, ts, S))
-        self.listbox.show_all()
+            card = self._make_card(doc, k, a, b, ts, S)
+            card.set_size_request(width if width > 1 else self.WIDTH, -1)
+            self.cards.append(card)
+            self.fixed.put(card, 0, 0)
+        self.fixed.show_all()
+        if self.cards:
+            self.pitch = max(self.THUMB_H + 8, self.cards[0].get_preferred_height()[1] + self.GAP)
+        self._set_targets(animate=False)
         if DEBUG:
             self._geom_tries = 0
             GLib.timeout_add(60, self._log_geometry)
+        return False
+
+    def _fixed_allocated(self, fixed, alloc):
+        # Gtk.Fixed da a cada hija su tamaño mínimo: a las tarjetas se les pide el ancho de la pila. Al crearlas se
+        # usa el ancho ya asignado (_rebuild); si cambia después se corrige en un idle, porque un queue_resize
+        # desde dentro del size-allocate no provoca otra pasada de layout (GTK limpia la marca al salir).
+        if any(c.get_size_request()[0] != alloc.width for c in self.cards):
+            GLib.idle_add(self._fit_width, alloc.width)
+
+    def _fit_width(self, width):
+        if self.fixed.get_allocated_width() == width:
+            for card in self.cards:
+                if card.get_size_request()[0] != width:
+                    card.set_size_request(width, -1)
         return False
 
     def _thumb(self, doc, t):
@@ -2822,28 +2847,31 @@ class SegPanel(Gtk.Box):
         self._pix[key] = pb
         return pb
 
-    def _make_row(self, doc, k, a, b, ts, S):
-        row = Gtk.ListBoxRow()
-        row.seg = (a, b)
-        row.order = k
+    def _make_card(self, doc, k, a, b, ts, S):
+        card = Gtk.EventBox()
+        card.seg = (a, b)
+        card.y = card.target_y = 0.0
+        card.anim_from, card.anim_t0 = 0.0, None
+        card.get_style_context().add_class("ts-card")
+        card.set_tooltip_text("%s – %s\nArrastra para cambiar el orden de corte · clic: ir ahí en el mosaico"
+                              % (fmt_time(a), fmt_time(b)))
+        card.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, self.TARGETS, Gdk.DragAction.MOVE)
+        card.connect("drag-begin", self._drag_begin)
+        card.connect("drag-data-get", self._drag_data_get)
+        card.connect("drag-end", self._drag_end)
+        card.drag_dest_set(Gtk.DestDefaults.MOTION | Gtk.DestDefaults.DROP, self.TARGETS, Gdk.DragAction.MOVE)
+        card.connect("drag-motion", self._drag_motion)
+        card.connect("drag-data-received", self._drag_received)
+        card.connect("button-press-event", self._card_pressed)
+        card.connect("button-release-event", self._card_released)
+        card.connect("enter-notify-event", self._card_enter)
+        card.connect("leave-notify-event", self._card_leave)
+        card.connect("realize", self._card_realized)
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        box.set_margin_start(4)
+        box.set_margin_start(6)
         box.set_margin_end(2)
         box.set_margin_top(2)
         box.set_margin_bottom(2)
-        handle = Gtk.EventBox()
-        hl = Gtk.Label(label="≡")
-        hl.get_style_context().add_class("dim-label")
-        handle.add(hl)
-        handle.set_tooltip_text("Arrastra para cambiar el orden de corte")
-        handle.drag_source_set(Gdk.ModifierType.BUTTON1_MASK, self.TARGETS, Gdk.DragAction.MOVE)
-        handle.connect("drag-begin", self._drag_begin)
-        handle.connect("drag-data-get", self._drag_data_get)
-        handle.connect("drag-end", self._drag_end)
-        row.drag_dest_set(Gtk.DestDefaults.MOTION | Gtk.DestDefaults.DROP, self.TARGETS, Gdk.DragAction.MOVE)
-        row.connect("drag-motion", self._drag_motion)
-        row.connect("drag-data-received", self._drag_received)
-        box.pack_start(handle, False, False, 0)
         tiles = [t for t in ts if t < b and t + S > a]
         edges = ([tiles[0]] + ([tiles[-1]] if len(tiles) > 1 else [])) if tiles else []
         for t in edges:
@@ -2872,103 +2900,192 @@ class SegPanel(Gtk.Box):
         close.set_tooltip_text("Quitar este tramo de la selección")
         close.connect("clicked", lambda *_: self.on_delete(a, b))
         box.pack_end(close, False, False, 0)
-        row.add(box)
-        row.set_tooltip_text("%s – %s" % (fmt_time(a), fmt_time(b)))
-        row.handle, row.close = handle, close
-        return row
+        card.add(box)
+        card.close = close
+        return card
+
+    # --- colocación y animación ---
+    def _set_targets(self, animate):
+        """Cada tarjeta a la altura de su posición en la lista; con animate se desliza desde donde esté."""
+        for k, card in enumerate(self.cards):
+            ty = float(k * self.pitch)
+            if card.target_y == ty and (card.y == ty or animate):
+                continue
+            card.target_y = ty
+            if animate:
+                card.anim_from, card.anim_t0 = card.y, None   # el instante de salida lo pone el primer tick
+            else:
+                card.y = ty
+                self.fixed.move(card, 0, int(ty))
+        if animate and self._tick is None and any(c.y != c.target_y for c in self.cards):
+            self._anim_frames, self._anim_t0 = 0, time.monotonic()
+            self._tick = self.add_tick_callback(self._on_tick)
+
+    def _on_tick(self, widget, clock):
+        now = clock.get_frame_time() / 1e6
+        moving = False
+        for card in self.cards:
+            if card.y == card.target_y:
+                continue
+            if card.anim_t0 is None:
+                card.anim_t0 = now
+            p = min(1.0, (now - card.anim_t0) / (self.ANIM_MS / 1000.0))
+            e = 1.0 - (1.0 - p) ** 3                       # ease-out: arranca rápido y frena al llegar
+            ny = card.target_y if p >= 1.0 else card.anim_from + (card.target_y - card.anim_from) * e
+            if int(round(ny)) != int(round(card.y)) or p >= 1.0:
+                self.fixed.move(card, 0, int(round(ny)))
+            card.y = ny
+            if p < 1.0:
+                moving = True
+        self._anim_frames += 1
+        if moving:
+            return GLib.SOURCE_CONTINUE
+        self._tick = None
+        if DEBUG:
+            log("seganim: %d fotogramas en %d ms" % (self._anim_frames, 1000 * (time.monotonic() - self._anim_t0)))
+        return GLib.SOURCE_REMOVE
+
+    # --- tarjeta: hover, cursor y clic ---
+    def _card_realized(self, card):
+        cur = Gdk.Cursor.new_from_name(card.get_display(), "grab")
+        if cur is not None:
+            card.get_window().set_cursor(cur)
+
+    def _card_enter(self, card, event):
+        if event.detail != Gdk.NotifyType.INFERIOR:
+            card.set_state_flags(Gtk.StateFlags.PRELIGHT, False)
+        return False
+
+    def _card_leave(self, card, event):
+        if event.detail != Gdk.NotifyType.INFERIOR:
+            card.unset_state_flags(Gtk.StateFlags.PRELIGHT)
+        return False
+
+    def _card_pressed(self, card, event):
+        if DEBUG:
+            log("segcard: pulsada %s botón %d tipo %s" % (fmt_time(card.seg[0]), event.button, event.type.value_nick))
+        if event.button == 1:
+            self._press_card = card      # si la pulsación acaba en arrastre, _drag_begin lo anula: soltar no es clic
+        return False
+
+    def _card_released(self, card, event):
+        pressed, self._press_card = self._press_card, None
+        if DEBUG:
+            log("segcard: soltada %s botón %d pulsada=%s arrastre=%s" % (fmt_time(card.seg[0]), event.button,
+                                                                          pressed is card, self._drag_card is not None))
+        if event.button == 1 and pressed is card and self._drag_card is None:
+            self.on_goto(card.seg[0])
+        return False
 
     # --- arrastrar y soltar para reordenar ---
-    # La tarjeta arrastrada se queda en la lista, atenuada, y va cambiando de sitio según dónde esté el cursor
-    # (mitad superior de una tarjeta = delante de ella, inferior = detrás), así se ve dónde va a quedar. Al
-    # soltar se guarda el orden que se ve; si se cancela (Esc, soltar fuera) vuelve al de partida.
-    def _drag_begin(self, handle, context):
-        row = handle.get_ancestor(Gtk.ListBoxRow)
-        alloc = row.get_allocation()
-        surface = cairo.ImageSurface(cairo.FORMAT_ARGB32, max(1, alloc.width), max(1, alloc.height))
-        row.draw(cairo.Context(surface))
-        ha = handle.get_allocation()
-        pt = handle.translate_coordinates(row, ha.width // 2, ha.height // 2)   # el asa queda bajo el cursor
-        if pt:
-            surface.set_device_offset(-pt[0], -pt[1])
-        Gtk.drag_set_icon_surface(context, surface)
-        self._drag_row = row
-        self._drag_orig = sorted(self.listbox.get_children(), key=lambda r: r.order)
+    # La tarjeta arrastrada se queda en la lista, atenuada, y va cambiando de sitio según dónde esté el cursor;
+    # las demás se deslizan para hacerle hueco, así se ve dónde va a quedar. La decisión se toma sobre la rejilla
+    # de posiciones finales (no sobre las tarjetas a medio deslizar, que harían oscilar el orden): la casilla
+    # bajo el cursor y su mitad. Al soltar se guarda el orden que se ve; si se cancela (Esc, soltar fuera) vuelve
+    # al de partida.
+    def _drag_begin(self, card, context):
+        alloc = card.get_allocation()
+        win = card.get_window()
+        pos = win.get_device_position(context.get_device()) if win is not None else None
+        hx, hy = (pos[1], pos[2]) if pos else (alloc.width // 2, alloc.height // 2)
+        if DEBUG:
+            log("segdrag: icono %dx%d, agarre %d,%d" % (alloc.width, alloc.height, hx, hy))
+        # la imagen del icono son los píxeles de la tarjeta tal como se ve, con el punto de agarre bajo el cursor
+        pb = Gdk.pixbuf_get_from_window(win, 0, 0, max(1, alloc.width), max(1, alloc.height)) if win else None
+        if pb is not None:
+            Gtk.drag_set_icon_pixbuf(context, pb, hx, hy)
+        self._drag_card = card
+        self._drag_orig = list(self.cards)
         self._dropped = False
-        row.get_style_context().add_class("ts-dragging")
+        self._press_card = None
+        card.get_style_context().add_class("ts-dragging")
 
-    def _drag_data_get(self, handle, context, data, info, time):
-        idx = handle.get_ancestor(Gtk.ListBoxRow).get_index()
+    def _drag_data_get(self, card, context, data, info, time_):
+        idx = self.cards.index(card) if card in self.cards else 0
         data.set(data.get_target(), 8, str(idx).encode("ascii"))
 
     def _place(self, dst):
-        """Coloca la tarjeta arrastrada en la posición dst (contando sin ella)."""
-        rows = sorted(self.listbox.get_children(), key=lambda r: r.order)
-        if self._drag_row not in rows:
+        """Coloca la tarjeta arrastrada en la posición dst."""
+        if self._drag_card not in self.cards:
             return
-        cur = rows.index(self._drag_row)
-        dst = max(0, min(len(rows) - 1, dst))
+        cur = self.cards.index(self._drag_card)
+        dst = max(0, min(len(self.cards) - 1, dst))
         if dst == cur:
             return
-        rows.insert(dst, rows.pop(cur))
-        for k, r in enumerate(rows):
-            r.order = k
-        self.listbox.invalidate_sort()
+        self.cards.insert(dst, self.cards.pop(cur))
+        self._set_targets(animate=True)
         if DEBUG:
-            log("segdrag: posición %d de %d" % (dst + 1, len(rows)))
+            log("segdrag: posición %d de %d" % (dst + 1, len(self.cards)))
 
-    def _drag_motion(self, row, context, x, y, time):
-        if self._drag_row is None:
-            return False
-        a = row.get_allocation()
-        dst = row.get_index() + (1 if y > a.height / 2.0 else 0)
-        if self._drag_row.get_index() < dst:
-            dst -= 1
+    def _motion_at(self, fy):
+        """Cursor a la altura fy (coordenadas de la pila): casilla k y mitad; mitad superior = delante de esa
+        tarjeta, inferior = detrás. Media casilla de histéresis: el orden sólo cambia al cruzar una mitad."""
+        n = len(self.cards)
+        if not n or self._drag_card is None:
+            return
+        cur = self.cards.index(self._drag_card)
+        k = int(fy // self.pitch)
+        frac = (fy - k * self.pitch) / float(self.pitch)
+        if k < 0:
+            dst = 0
+        elif k >= n:
+            dst = n - 1
+        elif k == cur:
+            return
+        elif k < cur:
+            dst = k if frac < 0.5 else k + 1
+        else:
+            dst = k if frac > 0.5 else k - 1
         self._place(dst)
-        self.sw.get_vadjustment().clamp_page(a.y, a.y + a.height)   # una tarjeta a medio ver se descubre entera
-        return True
+        k = max(0, min(n - 1, k))
+        self.sw.get_vadjustment().clamp_page(k * self.pitch, (k + 1) * self.pitch)   # una tarjeta a medio ver se descubre
 
-    def _drag_motion_bg(self, sw, context, x, y, time):
-        if self._drag_row is None:
+    def _drag_motion(self, card, context, x, y, time_):
+        if self._drag_card is None:
             return False
-        pt = sw.translate_coordinates(self.listbox, x, y)
-        row = self.listbox.get_row_at_y(pt[1]) if pt else None
-        if row is not None:
-            return self._drag_motion(row, context, x, pt[1] - row.get_allocation().y, time)
-        self._place(len(self.listbox.get_children()) if pt and pt[1] > 0 else 0)
+        pt = card.translate_coordinates(self.fixed, x, y)
+        if pt:
+            self._motion_at(pt[1])
         return True
 
-    def _drag_received(self, widget, context, x, y, data, info, time):
-        if self._drag_row is None:
+    def _drag_motion_bg(self, sw, context, x, y, time_):
+        if self._drag_card is None:
+            return False
+        pt = sw.translate_coordinates(self.fixed, x, y)
+        if pt:
+            self._motion_at(pt[1])
+        return True
+
+    def _drag_received(self, widget, context, x, y, data, info, time_):
+        if self._drag_card is None:
             return
         self._dropped = True
-        segs = [r.seg for r in sorted(self.listbox.get_children(), key=lambda r: r.order)]
+        segs = [c.seg for c in self.cards]
         if segs != self._segs:
             self.on_reorder(segs)
 
-    def _drag_end(self, handle, context):
-        row, orig = self._drag_row, self._drag_orig
-        self._drag_row = self._drag_orig = None
-        if row is None:
+    def _drag_end(self, card, context):
+        card_, orig = self._drag_card, self._drag_orig
+        self._drag_card = self._drag_orig = None
+        if card_ is None:
             return
-        row.get_style_context().remove_class("ts-dragging")
+        card_.get_style_context().remove_class("ts-dragging")
         if not self._dropped and orig:
-            for k, r in enumerate(orig):
-                r.order = k
-            self.listbox.invalidate_sort()
+            self.cards = [c for c in orig if c in self.cards]
+            self._set_targets(animate=True)
 
     def _log_geometry(self):
         top = self.get_toplevel()
-        rows = self.listbox.get_children()
-        if any(r.get_allocation().width <= 1 for r in rows) and self._geom_tries < 20:
-            self._geom_tries += 1      # GTK coloca las filas en la fase de layout del siguiente fotograma: esperar
+        if any(c.get_allocation().width <= 1 for c in self.cards) and self._geom_tries < 20:
+            self._geom_tries += 1      # GTK coloca las tarjetas en la fase de layout del siguiente fotograma: esperar
             return True
 
         def center(w):
             a = w.get_allocation()
             pt = w.translate_coordinates(top, 0, 0)
             return "%d,%d" % (pt[-2] + a.width // 2, pt[-1] + a.height // 2) if pt else "?"
-        log("segpanel: %s · rows=%s · dels=%s" % (self.header.get_text(), ";".join(center(r.handle) for r in rows),
-                                                 ";".join(center(r.close) for r in rows)))
+        log("segpanel: %s · rows=%s · dels=%s" % (self.header.get_text(), ";".join(center(c) for c in self.cards),
+                                                 ";".join(center(c.close) for c in self.cards)))
         return False
 
 
@@ -3854,6 +3971,8 @@ class ThumbSheet(Gtk.Window):
         self._update_buttons()
 
     def _seg_goto(self, t):
+        if DEBUG:
+            log("seggoto: ir a %s" % fmt_time(t))
         self.sheet.scroll_to_time(t)
 
     def clear_selection(self):
@@ -4653,7 +4772,8 @@ def main(argv):
         .ts-sheet-scroll scrollbar.vertical slider { min-width: 16px; min-height: 56px; border-radius: 10px; }
         .ts-sheet-scroll scrollbar.vertical { background-color: #1c1c1f; border: none; }   /* sin la raya clara de Adwaita */
         .ts-files row { padding: 1px 0; }
-        .ts-files row.ts-dragging { opacity: 0.3; }   /* hueco de la tarjeta arrastrada */
+        .ts-card:hover { background-color: alpha(@theme_fg_color, 0.07); }
+        .ts-card.ts-dragging { opacity: 0.3; }   /* hueco de la tarjeta arrastrada */
         .ts-panel-header { padding: 1px 2px 1px 8px; background-color: alpha(@theme_fg_color, 0.06);
                            border-bottom: 1px solid alpha(@theme_fg_color, 0.15); }
         scale marks { color: alpha(currentColor, 0.8); }

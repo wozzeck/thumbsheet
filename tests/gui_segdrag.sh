@@ -65,6 +65,9 @@ drag_to $((X+${R3%,*})) $((Y+${R3#*,})) $((X+${R1%,*}+60)) $((Y+${R1#*,}-10))
 shot 2-arrastrando-3a-a-1a 0.3
 [[ "$(nplace)" -gt "$N0" ]] && ok "a medio arrastre la tarjeta ya cambia de sitio ($(grep 'segdrag:' "$OUT/app.log" | tail -1 | sed 's/.*segdrag: //'))" || ko "sin reorden en vivo durante el arrastre"
 [[ "$(order)" == "[0, $((2*S0)), $((4*S0))]" ]] && ok "mientras se arrastra no se guarda nada" || ko "orden guardado a medio arrastre: $(order)"
+IC=$(grep -o "segdrag: icono [0-9]*x[0-9]*" "$OUT/app.log" | tail -1); [[ "$IC" == *"icono 280x"* ]] && ok "icono de arrastre = la tarjeta entera ($IC)" || ko "icono de arrastre: '$IC' (esperado 280 de ancho)"
+AN=$(grep -o "seganim: [0-9]* fotogramas en [0-9]* ms" "$OUT/app.log" | tail -1); F=$(echo "$AN" | awk '{print $2}')
+[[ -n "$F" && "$F" -ge 5 ]] && ok "las demás tarjetas se deslizan con animación ($AN)" || ko "sin animación de deslizamiento: '$AN'"
 xdotool mouseup 1; sleep 0.9
 [[ "$(order)" == "[$((4*S0)), 0, $((2*S0))]" ]] && ok "soltar sobre la 1.ª: orden [$((4*S0)), 0, $((2*S0))]" || ko "orden tras soltar: $(order)"
 shot 3-tras-soltar 0.3
@@ -86,6 +89,13 @@ xdotool key Escape; sleep 0.5; xdotool mouseup 1; sleep 0.9
 shot 5-tras-cancelar 0.3
 [[ "$(order)" == "[0, $((2*S0)), $((4*S0))]" ]] && ok "Esc cancela: orden intacto [0, $((2*S0)), $((4*S0))]" || ko "orden tras cancelar: $(order)"
 SP=$(grep "segpanel:" "$OUT/app.log" | tail -1); [[ "$SP" == *"3 segmentos"* ]] && ok "panel sigue con 3 segmentos" || ko "panel tras cancelar: '$SP'"
+# 5b. clic (sin arrastrar) en la 2.ª tarjeta lleva el mosaico a su instante; la × de la 1.ª quita el tramo
+# (mover, esperar y pulsar: si el puntero llevaba un rato quieto sobre otra tarjeta hay un tooltip encima)
+R2=$(rowxy 2); xdotool mousemove $((X+${R2%,*})) $((Y+${R2#*,})); sleep 0.4; xdotool click 1; sleep 0.5
+grep -q "seggoto: ir a $(python3 -c "import sys; sys.path.insert(0,'$DIR'); print(__import__('thumbsheet').fmt_time($((2*S0))))")" "$OUT/app.log" && ok "clic en la 2.ª tarjeta: ir a $((2*S0)) s" || ko "el clic en la tarjeta no lleva al instante: $(grep 'seggoto:' "$OUT/app.log" | tail -1)"
+D1=$(grep "segpanel: 3" "$OUT/app.log" | tail -1 | sed -E 's/.*dels=([^ ]+).*/\1/' | cut -d';' -f1)
+xdotool mousemove $((X+${D1%,*})) $((Y+${D1#*,})); sleep 0.4; xdotool click 1; sleep 0.9
+[[ "$(order)" == "[$((2*S0)), $((4*S0))]" ]] && ok "× de la 1.ª tarjeta quita el tramo 0–$S0" || ko "orden tras ×: $(order)"
 grep -q "Traceback" "$OUT/app.log" && ko "traceback en el log" || ok "sin tracebacks"
 
 # 6. cierre

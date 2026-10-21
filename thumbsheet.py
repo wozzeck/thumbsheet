@@ -553,34 +553,46 @@ def short_error(text, default="error", limit=160):
 _RETRY_ERRNOS = {errno.EBUSY, errno.ETXTBSY, errno.EAGAIN, errno.EACCES, errno.EPERM}
 
 
-def remove_with_retry(path, timeout):
-    """os.remove reintentando durante `timeout` s si el fallo puede ser pasajero: un proceso que aún tiene el fichero
-    abierto y está terminando. En un montaje FUSE (sftp por gvfs, sshfs) borrar un fichero abierto se resuelve
-    renombrándolo a .fuse_hidden… y, si el servidor no lo permite, el borrado falla con «recurso ocupado»; un
-    servidor Windows contesta «permiso denegado» mientras alguien lo tiene abierto. Devuelve None si se borró (o ya
-    no existía) o el texto del error."""
+def _fs_with_retry(op, path, timeout, verb, missing_ok):
+    """Ejecuta `op()` (borrar, renombrar) reintentando durante `timeout` s si el fallo puede ser pasajero: un proceso
+    que aún tiene el fichero abierto y está terminando. En un montaje FUSE (sftp por gvfs, sshfs) borrar un fichero
+    abierto se resuelve renombrándolo a .fuse_hidden… y, si el servidor no lo permite, falla con «recurso ocupado»;
+    un servidor Windows contesta «permiso denegado» mientras alguien lo tiene abierto. Devuelve None si salió bien
+    o el texto del error."""
     path = pathlib.Path(path)
     deadline = time.monotonic() + timeout
     delay, first = 0.1, None
     while True:
         try:
-            os.remove(str(path))
+            op()
             if first is not None:
-                log("borrar: %s borrado tras reintentar %.1f s" % (path.name, time.monotonic() - first))
+                log("%s: %s hecho tras reintentar %.1f s" % (verb, path.name, time.monotonic() - first))
             return None
-        except FileNotFoundError:
-            return None
+        except FileNotFoundError as e:
+            if missing_ok:
+                return None
+            return "%s\n%s" % (path, e)
         except OSError as e:
             if e.errno not in _RETRY_ERRNOS or time.monotonic() >= deadline:
                 hint = ""
                 if e.errno in (errno.EBUSY, errno.ETXTBSY):
-                    hint = "\nEl archivo sigue abierto en otro programa (un montaje remoto no deja borrarlo mientras tanto)."
+                    hint = "\nEl archivo sigue abierto en otro programa (un montaje remoto no deja tocarlo mientras tanto)."
                 return "%s\n%s%s" % (path, e, hint)
             if first is None:
                 first = time.monotonic()
-                log("borrar: %s: %s; reintentando" % (path.name, e.strerror))
+                log("%s: %s: %s; reintentando" % (verb, path.name, e.strerror))
             time.sleep(delay)
             delay = min(1.0, delay * 2)
+
+
+def remove_with_retry(path, timeout):
+    """os.remove con reintentos (ver _fs_with_retry). None si se borró o ya no existía; si no, el texto del error."""
+    return _fs_with_retry(lambda: os.remove(str(path)), path, timeout, "borrar", missing_ok=True)
+
+
+def rename_with_retry(path, target, timeout):
+    """os.rename con reintentos (ver _fs_with_retry). None si se renombró; si no, el texto del error."""
+    return _fs_with_retry(lambda: os.rename(str(path), str(target)), path, timeout, "renombrar", missing_ok=False)
 
 
 def doc_complete(doc, interval):
@@ -2575,6 +2587,18 @@ def cut_output_path(video_path):
     return video_path.with_name(video_path.stem + "-cortado" + ext)
 
 
+def full_output_path(video_path):
+    """Nombre «cortado» para el vídeo entero sin tocarlo (botón Full): mismo contenedor y extensión, y si ya existe
+    uno con ese nombre, -cortado-2, -cortado-3…"""
+    video_path = pathlib.Path(video_path)
+    k = 1
+    while True:
+        cand = video_path.with_name("%s-cortado%s%s" % (video_path.stem, "" if k == 1 else "-%d" % k, video_path.suffix))
+        if not cand.exists():
+            return cand
+        k += 1
+
+
 def keyframes_near(path, times, window):
     """Instantes (s) de los keyframes de vídeo en las ventanas [t-window, t+window] de cada t. Sólo
     demux (ffprobe -show_packets con -read_intervals): no decodifica ni lee el fichero entero."""
@@ -3367,7 +3391,12 @@ class ThumbSheet(Gtk.Window):
         self.llc_btn.set_tooltip_text("Guardar un proyecto de LosslessCut (<vídeo>-proj.llc, junto al vídeo) con un segmento "
                                       "por cada racha de teselas seleccionadas")
         self.llc_btn.connect("clicked", self.on_llc)
+        self.full_btn = Gtk.Button(label="Full")
+        self.full_btn.set_tooltip_text("Dar por bueno el vídeo entero: lo renombra como <vídeo>-cortado (sin tocar el "
+                                       "contenido, como si se hubiera cortado de principio a fin) y lo quita de la lista")
+        self.full_btn.connect("clicked", self.on_full)
         bar.pack_end(self.llc_btn, False, False, 0)
+        bar.pack_end(self.full_btn, False, False, 0)
         bar.pack_end(self.cut_btn, False, False, 0)
         # mensaje arriba, barra de progreso abajo (generación en curso o en segundo plano, o corte)
         status_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -3526,10 +3555,10 @@ class ThumbSheet(Gtk.Window):
             return "%d,%d" % (x + a.width // 2, y + a.height // 2)
         sx, sy = origin(self.sheet)
         rows = ";".join(center(d.row) for d in self.docs if d.row is not None)
-        log("geometry: sheet=%d,%d cols=%d cell=%dx%d pad=%d gap=%d interval=%s tile=%s tilew=%d llc=%s cut=%s del=%s rows=%s" % (
+        log("geometry: sheet=%d,%d cols=%d cell=%dx%d pad=%d gap=%d interval=%s tile=%s tilew=%d llc=%s cut=%s del=%s full=%s rows=%s" % (
             sx, sy, self.sheet.cols, self.sheet.cell_w, self.sheet.cell_h, Sheet.PAD, Sheet.GAP,
             center(self.interval_scale), center(self.tile_scale), self.tile_scale.get_allocation().width,
-            center(self.llc_btn), center(self.cut_btn), center(self.del_btn), rows))
+            center(self.llc_btn), center(self.cut_btn), center(self.del_btn), center(self.full_btn), rows))
         return False
 
     # ---- documentos --------------------------------------------------------------------------
@@ -4055,6 +4084,7 @@ class ThumbSheet(Gtk.Window):
     def _update_buttons(self):
         doc = self.current
         self.del_btn.set_sensitive(doc is not None and self._cut is None)
+        self.full_btn.set_sensitive(doc is not None and self._cut is None and not doc.deleting)
         has_segs = bool(doc is not None and doc.info is not None and self._segments())
         self.llc_btn.set_sensitive(has_segs)
         self.cut_btn.set_sensitive(has_segs or self._cut is not None)
@@ -4684,6 +4714,81 @@ class ThumbSheet(Gtk.Window):
             GLib.idle_add(self._delete_done, doc, err, ok_text, err_text, ok_log)
         # no daemon: si se cierra la app a medias, el borrado confirmado termina igualmente
         threading.Thread(target=work, name="ts-delete", daemon=False).start()
+
+    # ---- Full: el vídeo entero vale tal cual ----------------------------------------------------
+    def on_full(self, *_):
+        doc = self.current
+        if doc is None or doc.deleting or self._cut is not None:
+            return
+        target = full_output_path(doc.path)
+        dlg = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
+                                buttons=Gtk.ButtonsType.NONE, text="¿Dar por bueno el vídeo entero?")
+        dlg.format_secondary_text("%s\n→ %s\n\nSólo cambia el nombre, como si se hubiera cortado de principio a fin: "
+                                  "el contenido no se toca y el vídeo sale de la lista." % (doc.path, target.name))
+        dlg.add_button("_Cancelar", Gtk.ResponseType.CANCEL)
+        btn = dlg.add_button("_Renombrar", Gtk.ResponseType.ACCEPT)
+        btn.get_style_context().add_class("suggested-action")
+        dlg.set_default_response(Gtk.ResponseType.ACCEPT)   # Intro acepta (ver on_delete), Esc cancela
+        btn.grab_focus()
+        resp = dlg.run()
+        dlg.destroy()
+        if resp != Gtk.ResponseType.ACCEPT:
+            return
+        self._rename_full(doc, target)
+
+    def _rename_full(self, doc, target):
+        """Renombra el vídeo de `doc` a su nombre «cortado» en un hilo (misma espera y reintentos que Eliminar: que
+        ningún ffmpeg lo tenga abierto, «ocupado» en montajes remotos) y lo quita de la lista. La caché de
+        miniaturas se mueve a la clave del nombre nuevo (tamaño y fecha no cambian), así reabrirlo es inmediato."""
+        if doc.deleting:
+            return
+        doc.deleting = True          # misma marca que Eliminar: fila insensible y fuera del segundo plano mientras tanto
+        log("full: %s → %s" % (doc.path.name, target.name))
+        if doc is self.current:
+            self.hide_preview()
+        if self.generator is not None and self.gen_doc is doc:
+            self.generator.cancel()
+            self.generator = None
+        if doc.row is not None:
+            doc.row.set_sensitive(False)
+            doc.row.sub_label.set_markup(sub_markup("Renombrando…"))
+        if doc is self.current:
+            self._show_neighbor(doc)
+        self._pause_background()
+        self._update_buttons()
+
+        def work():
+            if not Generator.quiesce(doc.path, 6.0):
+                log("full: %s: algún ffmpeg no ha terminado a tiempo" % doc.path.name)
+            err = rename_with_retry(doc.path, target, 8.0)
+            if err is None and doc.info is not None and doc.cache_dir is not None:
+                try:
+                    st = target.stat()
+                    h = hashlib.sha1()
+                    h.update(("%s|%d|%d|%d" % (target.resolve(), st.st_size, st.st_mtime_ns, THUMB_MAX)).encode("utf-8"))
+                    new_dir = CACHE_ROOT / h.hexdigest()[:16]
+                    if not new_dir.exists():
+                        os.rename(str(doc.cache_dir), str(new_dir))
+                        log("full: caché movida a %s" % new_dir.name)
+                except OSError as e:
+                    log("full: no se pudo mover la caché: %s" % e)
+            GLib.idle_add(self._full_done, doc, target, err)
+        threading.Thread(target=work, name="ts-full", daemon=False).start()
+
+    def _full_done(self, doc, target, err):
+        doc.deleting = False
+        GLib.idle_add(self._start_next_background)
+        if err:
+            if doc.row is not None:
+                doc.row.set_sensitive(True)
+                doc.row.sub_label.set_markup(sub_markup(doc.subtitle))
+            self._update_buttons()
+            self._error("No se pudo renombrar el archivo", err)
+            return False
+        log("full: renombrado %s" % target.name)
+        self._remove_doc(doc)
+        self._flash("Renombrado: %s" % target.name)
+        return False
 
     def _show_neighbor(self, doc):
         """Pasa a mostrar el vecino de `doc` (el siguiente, o el último si era el último) sin quitar su fila."""

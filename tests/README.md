@@ -33,6 +33,9 @@
 - `bench_scrollfill.sh <vídeo largo> [out]` — banco, no pasa/falla (Xvfb `:74`). Con una sábana de miles de
   teselas en caché (la primera vez la genera, intervalo 1 s), salta por la barra y mide cuánto tarda en
   completarse la pantalla (trazas `salto:` / `lleno:`).
+- `gui_full.sh <vídeo A corto> [out]` — Xvfb propio (`:71`). Botón Full con dos copias de A: Esc en el diálogo no
+  toca nada; Intro renombra a `-cortado.<ext>` sin cambiar el contenido (md5), quita el vídeo de la lista, pasa al
+  siguiente, toast verde, mueve la caché a la clave del nombre nuevo y al reabrir el renombrado no regenera.
 - `gui_errors.sh <vídeo A corto> <vídeo L mp4 faststart> [out]` — Xvfb propio (`:76`). Abre A, una copia de
   L con los datos a ceros, un texto con extensión .mp4 y otra copia de A: aspa roja en los dos rotos, el
   segundo plano pasa de largo y genera la última copia, sin marcas `.fail`; al pinchar en el vídeo a ceros

@@ -3,7 +3,7 @@
 Sábana de miniaturas de vídeo para Linux (GTK3). Abres uno o varios vídeos y aparece un mosaico con
 una captura cada N segundos. Controles: **Intervalo** (1 s, 2 s, 5, 10, 20, 30 s, 1, 5 o 10 min),
 **Tamaño** (teselas por fila, de 20 a la izquierda a 3 a la derecha: hacia la derecha, más grandes; el ancho se adapta a la ventana), y a la derecha del contador
-los botones **Cortar**, **LLC** y **Eliminar**. Al cambiar el tamaño o el intervalo, la tesela que estaba
+los botones **Cortar**, **Full**, **LLC** y **Eliminar**. Al cambiar el tamaño o el intervalo, la tesela que estaba
 en el centro del visor sigue en el centro.
 
 ```
@@ -84,6 +84,11 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   cada racha de teselas seleccionadas (del instante de la primera al de la última más el intervalo).
   Al abrir el vídeo en LosslessCut, los segmentos aparecen ya cargados. El fichero es JSON, válido
   para el LosslessCut actual (JSON5, esquema v2) y para versiones antiguas (YAML).
+- **Full**: el vídeo entero vale tal cual: lo renombra a `<vídeo>-cortado.<ext>` (mismo contenedor, el
+  contenido no se toca, como si se hubiera cortado de principio a fin) y lo quita de la lista, tras
+  confirmar (Intro acepta, Esc cancela). Si ya existe ese nombre usa `-cortado-2`, `-cortado-3`… La caché de
+  miniaturas se mueve con él, así que reabrir el renombrado no regenera nada. Mismas esperas y reintentos
+  que Eliminar (ffmpeg con el vídeo abierto, «ocupado» en carpetas remotas).
 - **Cortar**: corta los segmentos seleccionados y los une en `<vídeo>-cortado.mp4` (o `.mkv` si el
   contenedor original no admite copia) junto al original, con un único ffmpeg (demuxer `concat` con
   `inpoint`/`outpoint`, sin temporales). Dos modos:

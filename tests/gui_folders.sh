@@ -24,6 +24,8 @@ for i in $(seq 1 40); do grep -q "carpetas: [0-9]* vídeos" "$OUT/app.log" && br
 C=$(grep "carpetas: [0-9]* vídeos" "$OUT/app.log" | tail -1 | sed 's/.*carpetas: //')
 [[ "$C" == "3 vídeos"*": peli2.MP4, peli10.mp4, sub/hondo/clip.mkv" ]] && ok "carpeta: sólo los 3 soportados, sin ocultos, en orden natural ($C)" || ko "carpeta: '$C'"
 sleep 0.5; grep -q "archivos: 3" "$OUT/app.log" && ok "cabecera del panel: 3 archivos" || ko "cabecera: $(grep -o 'archivos: [0-9]*' "$OUT/app.log" | tail -1)"
+# («Buscando vídeos en la carpeta…» sólo llega a verse si el recorrido tarda más que el retardo de la barra: en local no)
+grep -q "barra: Analizando [0-9] de 3 archivos" "$OUT/app.log" && ok "barra: «Analizando k de 3 archivos…» durante el sondeo ($(grep -o 'Analizando [0-9] de 3' "$OUT/app.log" | tr '\n' ' '))" || ko "barra sin «Analizando…»: $(grep 'barra:' "$OUT/app.log" | head -4 | tr '\n' ' ')"
 for i in $(seq 1 120); do [[ "$(grep -c "fin: " "$OUT/app.log" || true)" -ge 3 ]] && break; sleep 0.5; done
 [[ "$(grep -c "fin: " "$OUT/app.log" || true)" -ge 3 ]] && ok "los tres se generan (el actual y dos en segundo plano)" || ko "generados: $(grep -c 'fin: ' "$OUT/app.log" || true) de 3"
 grep -q "Traceback" "$OUT/app.log" && ko "traceback en el log" || ok "sin tracebacks"

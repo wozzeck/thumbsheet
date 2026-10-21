@@ -34,7 +34,10 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
 - **Estado**: junto a los botones, arriba el mensaje (capturas, duración, resolución, segmentos) y
   abajo una barra de progreso: generación del vídeo actual, generación en segundo plano (con el nombre
   del fichero) o avance del corte, con el tiempo que falta estimado por el ritmo medio de la operación
-  (aparece en cuanto hay base para calcularlo y se refresca cada segundo).
+  (aparece en cuanto hay base para calcularlo y se refresca cada segundo). Mientras se analizan los
+  ficheros recién añadidos (ffprobe, de uno en uno) la barra dice «Analizando k de n archivos…», y
+  «Buscando vídeos en la carpeta…» mientras se recorre una carpeta; el segundo plano espera a que el
+  análisis termine para no quitarle máquina.
 - **Cambios de orientación o resolución**: cada miniatura sale con su propia proporción (también con el
   SAR de los anamórficos), sin deformar ni rellenar. En el mosaico, las filas de un vídeo así tienen
   altura propia: todas las teselas de una fila miden lo mismo de alto y el ancho va con su formato, de

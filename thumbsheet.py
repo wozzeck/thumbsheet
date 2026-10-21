@@ -3264,6 +3264,9 @@ class ThumbSheet(Gtk.Window):
         self.settings = load_settings()
         self.docs = []
         self._scanning = 0                    # carpetas recorriéndose en segundo plano
+        self._probing = None                  # documento que el hilo de sondeo está analizando ahora (ffprobe)
+        self._probe_batch = 0                 # ficheros encolados al sondeo desde la última vez que se vació
+        self._bar_logged = None               # DEBUG: último texto de la barra registrado
         self.current = None
         self.generator = None
         self._tick_id = None                  # refresco periódico del tiempo estimado
@@ -3549,11 +3552,13 @@ class ThumbSheet(Gtk.Window):
             doc.row = self._make_row(doc)
             self.listbox.add(doc.row)
             doc.row.show_all()
+            self._probe_batch += 1
             self._probe_q.put(doc)
             first_new = first_new or doc
         if first_new is not None:
             self._update_count()
             self._pause_background()   # sondeo pendiente: que el segundo plano no lo frene
+            self._refresh_status()     # la barra dice «Analizando k de n archivos…» mientras dura el sondeo
         if first_new is not None and self.current is None:
             self.listbox.select_row(first_new.row)
         if dirs:
@@ -3563,6 +3568,7 @@ class ThumbSheet(Gtk.Window):
         """Busca los vídeos soportados de las carpetas en un hilo (una carpeta remota puede tardar) y los añade."""
         self._scanning += 1
         self._update_count()
+        self._refresh_status()
         log("carpetas: buscando vídeos en %s" % ", ".join(str(d) for d in dirs))
 
         def done(found, dt):
@@ -3580,6 +3586,7 @@ class ThumbSheet(Gtk.Window):
             else:
                 self.toast.show_error("Sin vídeos soportados en %s" % ", ".join(d.name or str(d) for d in dirs))
             self._update_count()
+            self._refresh_status()
             return False
 
         def work():
@@ -3640,6 +3647,7 @@ class ThumbSheet(Gtk.Window):
     def _probe_loop(self):
         while True:
             doc = self._probe_q.get()
+            self._probing = doc
             try:
                 doc.ensure_info()
             except Exception as e:  # noqa: BLE001  — por si acaso: si este hilo muriera, la cola quedaría parada
@@ -3648,16 +3656,20 @@ class ThumbSheet(Gtk.Window):
                     doc.error = short_error(str(e), e.__class__.__name__)
             if doc.error:
                 log("sondeo: %s: no se pudo abrir: %s" % (doc.path.name, doc.error))
+            self._probing = None
             GLib.idle_add(self._doc_probed, doc)
 
     def _doc_probed(self, doc):
         if doc.row is not None:
             doc.row.sub_label.set_markup(sub_markup(doc.subtitle))
+        if self._probe_q.qsize() == 0 and self._probing is None:
+            self._probe_batch = 0      # sondeo al día: la próxima tanda cuenta desde cero
         if doc is self.current:
             self._load_current()
         else:
             self._start_next_background()
         self._refresh_row_states()
+        self._refresh_status()
         return False
 
     def on_row_selected(self, listbox, row):
@@ -4020,8 +4032,21 @@ class ThumbSheet(Gtk.Window):
                                                                     int(frac * 100), eta))
             self._ensure_ticker()
         else:
-            self.progress.set_fraction(1.0 if self.docs else 0.0)
-            self.progress.set_text("")
+            pending = self._probe_q.qsize() + (1 if self._probing is not None else 0)
+            if self._scanning:
+                self.progress.set_fraction(0.0)
+                self.progress.set_text("Buscando vídeos en %s…" % ("la carpeta" if self._scanning == 1 else "las carpetas"))
+            elif pending:
+                # mientras se analizan los recién añadidos (ffprobe, de uno en uno) el segundo plano espera: que se vea
+                total = max(self._probe_batch, pending)
+                self.progress.set_fraction((total - pending) / float(total))
+                self.progress.set_text("Analizando %d de %d archivos…" % (total - pending + 1, total))
+            else:
+                self.progress.set_fraction(1.0 if self.docs else 0.0)
+                self.progress.set_text("")
+        if DEBUG and self.progress.get_text() != self._bar_logged:
+            self._bar_logged = self.progress.get_text()
+            log("barra: %s" % (self._bar_logged or "(vacía)"))
 
     def _flash(self, text):
         """Aviso de operación correcta (toast verde, 3 s)."""

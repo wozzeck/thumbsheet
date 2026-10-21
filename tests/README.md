@@ -21,6 +21,12 @@
   datos a ceros (ffprobe la acepta; el generador desiste en segundos sin dejar marcas, en seek y en tramos,
   y reintenta en la siguiente pasada), un vídeo dañado sólo al principio (no desiste) y la carrera con la
   GPU (fallo en los últimos tramos con la CPU ya terminada: el generador tiene que acabar igualmente).
+- `test_folders.py` — sin ventana, instantáneo: `find_videos` recorre carpetas y subcarpetas y devuelve sólo los
+  ficheros soportados (por extensión, mayúsculas incluidas), sin ocultos, sin seguir enlaces a carpetas, en
+  orden natural por ruta; varias carpetas a la vez; carpeta inexistente.
+- `gui_folders.sh <vídeo A corto> [out]` — Xvfb propio (`:72`). Arranca la app con una CARPETA como único argumento
+  (copias de A con distintos nombres y extensiones en subcarpetas, más ficheros que no son vídeo y uno oculto) y
+  comprueba que entran sólo los soportados, en orden natural, y que se generan.
 - `test_loader.py` — sin ventana, instantáneo: el cargador de miniaturas atiende lo visible antes que la precarga
   (y lo visible de arriba abajo), descarta lo que ya no está a la vista ni en el margen, y una petición visible
   saca la tesela de la cola de precarga.

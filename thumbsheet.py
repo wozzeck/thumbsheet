@@ -72,6 +72,30 @@ VIDEO_EXT = (".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".mpg", ".mpeg", "
              ".wmv", ".flv", ".3gp", ".ogv", ".vob")
 
 
+def natural_key(text):
+    """«vídeo2» antes que «vídeo10»: los números se comparan como números."""
+    return [int(x) if x.isdigit() else x.lower() for x in re.split(r"(\d+)", text)]
+
+
+def is_video_name(name):
+    return not name.startswith(".") and os.path.splitext(name)[1].lower() in VIDEO_EXT
+
+
+def find_videos(dirs):
+    """Ficheros soportados (por extensión, sin distinguir mayúsculas) dentro de esas carpetas y todas sus
+    subcarpetas, en orden natural por ruta. Se saltan los nombres que empiezan por punto y no se siguen enlaces a
+    carpetas (bucles). Puede tardar en carpetas remotas: llamar desde un hilo."""
+    found = []
+    for d in dirs:
+        for root, subdirs, files in os.walk(str(d)):
+            subdirs[:] = [x for x in subdirs if not x.startswith(".")]
+            for f in files:
+                if is_video_name(f):
+                    found.append(pathlib.Path(root) / f)
+    found.sort(key=lambda q: [natural_key(part) for part in q.parts])
+    return found
+
+
 _PROF = {}
 _CNT = {}
 
@@ -3239,6 +3263,7 @@ class ThumbSheet(Gtk.Window):
         super(ThumbSheet, self).__init__()
         self.settings = load_settings()
         self.docs = []
+        self._scanning = 0                    # carpetas recorriéndose en segundo plano
         self.current = None
         self.generator = None
         self._tick_id = None                  # refresco periódico del tiempo estimado
@@ -3402,7 +3427,12 @@ class ThumbSheet(Gtk.Window):
         add_btn.set_relief(Gtk.ReliefStyle.NONE)
         add_btn.set_tooltip_text("Añadir vídeos a la lista (Ctrl+O). Cada recorte se guarda junto a su original.")
         add_btn.connect("clicked", lambda *_: self.add_paths(choose_videos(self)))
+        dir_btn = Gtk.Button.new_from_icon_name("folder-open-symbolic", Gtk.IconSize.BUTTON)
+        dir_btn.set_relief(Gtk.ReliefStyle.NONE)
+        dir_btn.set_tooltip_text("Añadir los vídeos de una carpeta y sus subcarpetas (Ctrl+Mayús+O)")
+        dir_btn.connect("clicked", lambda *_: self.add_paths(choose_folders(self)))
         header.pack_end(add_btn, False, False, 0)
+        header.pack_end(dir_btn, False, False, 0)
         self.listbox.get_style_context().add_class("ts-files")
         panel = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         panel.set_size_request(140, -1)
@@ -3501,11 +3531,16 @@ class ThumbSheet(Gtk.Window):
 
     # ---- documentos --------------------------------------------------------------------------
     def add_paths(self, paths):
+        """Ficheros se añaden ya; las carpetas se recorren (con subcarpetas) en un hilo y entran cuando acaba."""
         first_new = None
+        dirs = []
         for path in paths:
             try:
                 rp = pathlib.Path(path).resolve()
             except OSError:
+                continue
+            if rp.is_dir():
+                dirs.append(rp)
                 continue
             if not rp.is_file() or any(d.path == rp for d in self.docs):
                 continue
@@ -3521,10 +3556,44 @@ class ThumbSheet(Gtk.Window):
             self._pause_background()   # sondeo pendiente: que el segundo plano no lo frene
         if first_new is not None and self.current is None:
             self.listbox.select_row(first_new.row)
+        if dirs:
+            self._scan_dirs(dirs)
+
+    def _scan_dirs(self, dirs):
+        """Busca los vídeos soportados de las carpetas en un hilo (una carpeta remota puede tardar) y los añade."""
+        self._scanning += 1
+        self._update_count()
+        log("carpetas: buscando vídeos en %s" % ", ".join(str(d) for d in dirs))
+
+        def done(found, dt):
+            self._scanning -= 1
+
+            def rel(f):
+                for d in dirs:
+                    if d in f.parents:
+                        return str(f.relative_to(d))
+                return str(f)
+            names = ", ".join(rel(f) for f in found)
+            log("carpetas: %d vídeos en %.1f s: %s" % (len(found), dt, names if len(names) <= 300 else names[:300] + "…"))
+            if found:
+                self.add_paths(found)
+            else:
+                self.toast.show_error("Sin vídeos soportados en %s" % ", ".join(d.name or str(d) for d in dirs))
+            self._update_count()
+            return False
+
+        def work():
+            t0 = time.time()
+            found = find_videos(dirs)
+            GLib.idle_add(done, found, time.time() - t0)
+        threading.Thread(target=work, name="ts-scan", daemon=True).start()
 
     def _update_count(self):
         n = len(self.docs)
-        self.count_label.set_text("Sin archivos" if n == 0 else "1 archivo" if n == 1 else "%d archivos" % n)
+        text = "Sin archivos" if n == 0 else "1 archivo" if n == 1 else "%d archivos" % n
+        if self._scanning:
+            text += " · buscando…"
+        self.count_label.set_text(text)
         if DEBUG:
             log("archivos: %d" % n)
 
@@ -4748,6 +4817,9 @@ class ThumbSheet(Gtk.Window):
         if ctrl and event.keyval == Gdk.KEY_o:
             self.add_paths(choose_videos(self))
             return True
+        if ctrl and event.keyval == Gdk.KEY_O:   # Ctrl+Mayús+O
+            self.add_paths(choose_folders(self))
+            return True
         if ctrl and event.keyval == Gdk.KEY_a:
             self.select_all()
             return True
@@ -4807,6 +4879,16 @@ def choose_videos(parent=None):
     return paths
 
 
+def choose_folders(parent=None):
+    dlg = Gtk.FileChooserNative.new("Añadir carpetas de vídeos", parent, Gtk.FileChooserAction.SELECT_FOLDER,
+                                    "Añadir", "Cancelar")
+    dlg.set_select_multiple(True)
+    res = dlg.run()
+    paths = list(dlg.get_filenames() or []) if res == Gtk.ResponseType.ACCEPT else []
+    dlg.destroy()
+    return paths
+
+
 def main(argv):
     # los hilos de trabajo casi siempre esperan a ffmpeg: ceder el GIL cada 2 ms en vez de 5 acorta los parones del
     # hilo de la interfaz cuando alguno hace trabajo Python (medido: bloqueo máximo 141 → 82 ms) sin coste apreciable
@@ -4847,7 +4929,7 @@ def main(argv):
                 arg = GLib.filename_from_uri(arg)[0]
             except GLib.Error:
                 continue
-        if os.path.isfile(arg):
+        if os.path.isfile(arg) or os.path.isdir(arg):   # las carpetas se recorren (con subcarpetas) al abrir
             paths.append(arg)
         else:
             print("no existe: %s" % arg, file=sys.stderr)

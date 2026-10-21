@@ -12,7 +12,11 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
 ```
 
 - **Varios vídeos**: se listan en el panel izquierdo, con una cabecera que dice cuántos hay y un botón
-  `+` para añadir más (también `Ctrl+O` o arrastrándolos a la ventana). Cada fila muestra el nombre, el
+  `+` para añadir más (también `Ctrl+O` o arrastrándolos a la ventana). **Carpetas**: el botón de carpeta
+  (`Ctrl+Mayús+O`), arrastrar una carpeta a la ventana o pasarla como argumento añade todos los vídeos
+  soportados que haya en ella y en sus subcarpetas (por extensión, sin ocultos), en orden natural por ruta;
+  el recorrido va en un hilo aparte (una carpeta remota puede tardar) y la cabecera dice «buscando…»
+  mientras tanto. Cada fila muestra el nombre, el
   directorio (con `~` por el home) y duración, resolución y tamaño; los recortes de cada vídeo se guardan junto
   a su original, estén donde estén. A la derecha de la segunda y tercera líneas, un mosaico de
   4×4 cuadritos indica qué parte de sus miniaturas para el intervalo actual está ya en caché, por

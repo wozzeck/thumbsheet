@@ -2654,8 +2654,15 @@ def expand_to_keyframes(segments, path, duration, gop=None):
         after = [k for k in kfs if k >= b - 1e-3]
         na = max(before) if before else 0.0
         nb = min(after) if after else float(duration)
-        out.append((na, min(nb, float(duration))))
-    return Selection._normalize(out)
+        na, nb = float(na), min(float(nb), float(duration))
+        # Se respeta el orden de corte (el del panel de segmentos): NO se ordena por tiempo. Sólo se funden
+        # dos tramos consecutivos en el corte cuando, al crecer hasta los keyframes, el segundo empieza
+        # dentro del primero (o justo donde acaba); así no se repiten fotogramas entre ellos.
+        if out and out[-1][0] <= na <= out[-1][1]:
+            out[-1] = (out[-1][0], max(out[-1][1], nb))
+        else:
+            out.append((na, nb))
+    return out
 
 
 def write_concat_list(list_path, video_path, segments):

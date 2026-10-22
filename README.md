@@ -96,7 +96,8 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
     Cada borde se mueve **hacia fuera** al keyframe más cercano, de modo que nunca se pierde nada de lo
     seleccionado aunque pueda sobrar algo (el aviso final dice cuánto). Los keyframes se localizan con
     `ffprobe` leyendo sólo ventanas alrededor de cada borde, no el fichero entero. Tarda lo que tarde el
-    disco en copiar.
+    disco en copiar. Los tramos salen en el orden del panel de segmentos; si al crecer hasta los keyframes
+    dos tramos consecutivos en el corte se solapan, se funden en uno para no repetir fotogramas.
   - *Exacto al fotograma*: recodifica (H.264 CRF 20 + AAC). Preciso, pero recomprime y es lento.
   El progreso se ve en el contador y el botón pasa a "Cancelar" mientras dura. El resultado queda junto
   al original y no se añade al panel (si ya estaba cargado, se vuelve a sondear porque ha cambiado). El botón de la derecha del diálogo, **Cortar y

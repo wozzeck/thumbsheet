@@ -3,6 +3,10 @@
 - `test_generator.py <vídeo> [intervalos]` — sin pantalla. Genera para cada intervalo (por defecto 60 y 5),
   comprueba que no falta ninguna captura ni cambia el tamaño, y que los modos *seek* y *tramos*
   producen el mismo fotograma. Imprime tiempos. Usa un directorio temporal, no toca la caché real.
+- `test_cut_order.py` — sin pantalla, unos segundos: el corte respeta el orden del panel de segmentos. Construye un
+  vídeo de 6 s con un color por segundo y keyframe cada segundo, comprueba que `expand_to_keyframes` mantiene el
+  orden pedido (fundiendo sólo tramos consecutivos que se solapan en el tiempo) y corta de verdad en los dos modos
+  (copia de streams y exacto) mirando el color de cada tramo del resultado.
 - `test_llc.py` — sin pantalla, instantáneo: segmentos a partir de la selección, fichero `-proj.llc`
   y ajuste del intervalo a múltiplos de 5.
 - `test_damaged.py <vídeo mp4> [fracción]` — sin pantalla. Trunca una copia del vídeo (por defecto a la

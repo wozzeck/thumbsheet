@@ -37,6 +37,12 @@
 - `bench_scrollfill.sh <vídeo largo> [out]` — banco, no pasa/falla (Xvfb `:74`). Con una sábana de miles de
   teselas en caché (la primera vez la genera, intervalo 1 s), salta por la barra y mide cuánto tarda en
   completarse la pantalla (trazas `salto:` / `lleno:`).
+- `gui_keys.sh <vídeo A de unos minutos> [out]` — Xvfb propio (`:70`), tres copias de A. Zoom con la rueda:
+  `Ctrl+rueda` cambia las teselas por fila y no el intervalo, `Ctrl+Mayús+rueda` cambia el intervalo (arriba
+  acerca, abajo aleja) y no el tamaño, la rueda sola no cambia ninguno. Teclas: `C` sin segmentos no abre nada;
+  con uno abre el diálogo de corte, `Esc` lo cierra sin tocar nada y `C` + `Intro` corta y borra el original (en
+  modo exacto, elegido con la flecha abajo, para que un segundo `Intro` llegue con el corte en marcha y se compruebe
+  que no lo cancela); `Ctrl+C` no abre el diálogo; `Supr` abre Eliminar, `Esc` no borra y `Supr` + `Intro` borra.
 - `gui_full.sh <vídeo A corto> [out]` — Xvfb propio (`:71`). Botón Full con dos copias de A: Esc en el diálogo no
   toca nada; Intro renombra a `-cortado.<ext>` sin cambiar el contenido (md5), quita el vídeo de la lista, pasa al
   siguiente, toast verde, mueve la caché a la clave del nombre nuevo y al reabrir el renombrado no regenera.

@@ -106,6 +106,9 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   termina bien y la duración del resultado cuadra. Mientras dura el corte el diálogo se queda abierto
   mostrando el progreso, con Cancelar; en cuanto empieza el borrado se cierra, y el borrado va en
   segundo plano como con Eliminar: el original desaparece del panel y se abre el siguiente de la lista.
+  Con el teclado: `C` abre el diálogo e `Intro` confirma directamente **cortar y borrar original** (abrir el
+  diálogo ya es el primer paso, así que no hace falta armar nada); `Alt+T` sólo corta, `Esc` cancela y las
+  flechas eligen el modo. Con el corte en marcha, Intro no hace nada, para que un segundo Intro no lo cancele.
 - **Panel de segmentos** (derecha, plegable con el botón **Segmentos**): los tramos seleccionados en su
   orden de corte, cada uno con su primer y último fotograma, inicio y duración; la cabecera dice cuántos
   hay y cuánto suman. Arrastra una tarjeta (por cualquier punto menos la ×) para cambiar el orden, que es
@@ -114,8 +117,8 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   inferior = detrás; el hueco bajo la última = al final); al soltar se guarda ese orden, y Esc o soltar
   fuera lo deja como estaba. × quita el tramo; clic lleva el mosaico a ese instante. El orden se guarda
   con la selección y sobrevive a los retoques de los tramos.
-- **Eliminar**: borra el archivo de vídeo del disco directamente, sin papelera, tras confirmar (Intro
-  acepta, Esc cancela). Antes de borrar espera a que terminen los ffmpeg que tuvieran el vídeo abierto y
+- **Eliminar** (también la tecla `Supr`): borra el archivo de vídeo del disco directamente, sin papelera,
+  tras confirmar (Intro acepta, Esc cancela). Antes de borrar espera a que terminen los ffmpeg que tuvieran el vídeo abierto y
   reintenta unos segundos si el sistema contesta «ocupado» o «permiso denegado»: en una carpeta remota
   (sftp por gvfs, sshfs) borrar un fichero abierto falla a veces por eso. El borrado
   (el fichero y su caché de miniaturas, que pueden ser miles) va en segundo plano: el diálogo se cierra al
@@ -132,7 +135,10 @@ tramos (con GPU si la hay): en vídeos largos tardan.
 
 Los sliders aplican su valor al soltar el ratón (mientras arrastras sólo cambia la etiqueta); con la
 rueda o el teclado, al momento. Atajos: la rueda sobre cada slider mueve un paso; `Ctrl+rueda` sobre el mosaico o `Ctrl +/-` cambian
-las teselas por fila; `Ctrl+A` selecciona todo; `Esc` deselecciona; `Ctrl+Q` cierra.
+las teselas por fila (rueda arriba, más grandes); `Ctrl+Mayús+rueda` sobre el mosaico cambia el intervalo (rueda
+arriba acerca: intervalo más corto, más teselas; abajo aleja), conservando la zona del vídeo a la vista como el
+slider; `C` abre Cortar (Intro en el diálogo = cortar y borrar original); `Supr` abre Eliminar (Intro confirma);
+`Ctrl+A` selecciona todo; `Esc` deselecciona; `Ctrl+Q` cierra.
 
 ## Instalación (Ubuntu / Mint / Debian)
 

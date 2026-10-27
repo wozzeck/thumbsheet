@@ -80,7 +80,7 @@ xdotool windowfocus --sync "$WID"; xdotool key Escape; sleep 0.4; chmod u+w "$LL
 chk "Esc cierra el toast de error sin tocar la selección" "$(sel)" "$E2"
 
 # 4. Cortar sin pérdida: bordes a keyframes (cada 6 s en el vídeo de prueba)
-xdotool mousemove $((X+CX)) $((Y+CY)) click 1; shot 4a-dialogo-cortar 1; xdotool key Return
+xdotool mousemove $((X+CX)) $((Y+CY)) click 1; shot 4a-dialogo-cortar 1; xdotool key alt+t   # Alt+T = sólo cortar (Intro es cortar y borrar)
 for i in $(seq 1 60); do grep -q "cut: hecho\|cut: error" "$OUT/app.log" && break; sleep 0.5; done
 CUT="$OUT/video/copia-$(basename "${VIDEO_A%.*}")-cortado.mp4"
 if [[ -f "$CUT" ]]; then CD=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$CUT"); python3 -c "import sys; d=float(sys.argv[1]); a=int(sys.argv[2]); b=int(sys.argv[3]); ea=a-a%6; eb=b+(-b)%6; sys.exit(0 if abs(d-(eb-ea))<=4 else 1)" "$CD" "$A" "$B" && ok "corte sin pérdida: $(basename "$CUT") dura ${CD%.*} s (keyframes alrededor de $A–$B)" || ko "duración del corte inesperada: $CD"; else ko "no existe $CUT: $(grep 'cut:' "$OUT/app.log" | tail -1)"; fi

@@ -3350,7 +3350,8 @@ class ThumbSheet(Gtk.Window):
             self.interval_scale.add_mark(i, Gtk.PositionType.BOTTOM, interval_mark(sec))
         self.interval_scale.set_hexpand(True)
         self.interval_scale.set_value(INTERVALS.index(interval))
-        self.interval_scale.set_tooltip_text("Tiempo entre capturas: 1 s, 2 s, 5 s, 10 s, 20 s, 30 s, 1, 5 o 10 min (rueda = un paso)")
+        self.interval_scale.set_tooltip_text("Tiempo entre capturas: 1 s, 2 s, 5 s, 10 s, 20 s, 30 s, 1, 5 o 10 min (rueda = un paso; "
+                                             "Ctrl+Mayús+rueda sobre el mosaico: arriba acerca, abajo aleja)")
         bar.pack_start(self.interval_scale, True, True, 0)
         self.interval_label = Gtk.Label(label="")
         self.interval_label.set_width_chars(6)
@@ -3381,7 +3382,7 @@ class ThumbSheet(Gtk.Window):
         # derecha: [contador] [LLC] [Eliminar]
         self.del_btn = Gtk.Button(label="Eliminar")
         self.del_btn.get_style_context().add_class("destructive-action")
-        self.del_btn.set_tooltip_text("Borrar el archivo de vídeo del disco (sin papelera), tras confirmar")
+        self.del_btn.set_tooltip_text("Borrar el archivo de vídeo del disco (sin papelera), tras confirmar (Supr; Intro confirma)")
         self.del_btn.connect("clicked", self.on_delete)
         self.seg_btn = Gtk.ToggleButton(label="Segmentos")
         self.seg_btn.set_tooltip_text("Panel de segmentos: los tramos seleccionados en su orden de corte (arrastra para "
@@ -3392,7 +3393,7 @@ class ThumbSheet(Gtk.Window):
         self.llc_btn = Gtk.Button(label="LLC")
         self.cut_btn = Gtk.Button(label="Cortar")
         self.cut_btn.set_tooltip_text("Cortar los segmentos seleccionados y unirlos en <vídeo>-cortado (sin pérdida, en keyframes; "
-                                      "o exacto recodificando)")
+                                      "o exacto recodificando). Tecla C; en el diálogo, Intro corta y borra el original")
         self.cut_btn.connect("clicked", self.on_cut)
         self._cut = None
         self.llc_btn.set_tooltip_text("Guardar un proyecto de LosslessCut (<vídeo>-proj.llc, junto al vídeo) con un segmento "
@@ -4441,13 +4442,31 @@ class ThumbSheet(Gtk.Window):
         out = cut_output_path(doc.path)
         total = sum(b - a for a, b in segs)
         dlg = Gtk.Dialog(title="Cortar y unir", transient_for=self, modal=True)
-        dlg.add_button("_Cancelar", Gtk.ResponseType.CANCEL)
-        dlg.add_button("Cor_tar", Gtk.ResponseType.ACCEPT)
+        cancel_btn = dlg.add_button("_Cancelar", Gtk.ResponseType.CANCEL)
+        only_btn = dlg.add_button("Cor_tar", Gtk.ResponseType.ACCEPT)
         del_btn = dlg.add_button(CUT_DEL_LABEL, RESP_CUT_DELETE)
         del_btn.set_tooltip_text("Corta y, si el resultado es correcto, borra el vídeo original del disco (sin papelera).\n"
-                                 "Hay que pulsarlo dos veces seguidas para evitar borrados accidentales.")
-        dlg.set_default_response(Gtk.ResponseType.ACCEPT)
+                                 "Con el ratón hay que pulsarlo dos veces seguidas, para evitar borrados accidentales.\n"
+                                 "Intro lo confirma directamente.")
+        dlg.set_default_response(RESP_CUT_DELETE)
         armed = [0]   # id del temporizador que desarma "cortar y borrar" (0 = sin armar)
+        # Intro = cortar y borrar el original, sin armar: abrir el diálogo (C o el botón Cortar) ya fue el primer
+        # paso. Con Tab sobre Cancelar o Cortar, Intro pulsa ese botón, como siempre. Mientras corta, Intro no hace
+        # nada (un segundo Intro no debe cancelar el corte); Esc o el botón Cancelar sí cancelan.
+        phase = {"by_key": False, "running": False}
+
+        def on_key(d, ev):
+            if ev.keyval not in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter):
+                return False
+            if phase["running"]:
+                return True
+            if d.get_focus() in (cancel_btn, only_btn):
+                return False
+            phase["by_key"] = True
+            log("cortar: Intro = cortar y borrar original")
+            d.response(RESP_CUT_DELETE)
+            return True
+        dlg.connect("key-press-event", on_key)
 
         def disarm():
             armed[0] = 0
@@ -4456,7 +4475,7 @@ class ThumbSheet(Gtk.Window):
             return False
 
         def on_response(d, rid):
-            if rid != RESP_CUT_DELETE:
+            if rid != RESP_CUT_DELETE or phase["by_key"]:
                 return
             if armed[0]:                                  # segunda pulsación: la respuesta sigue su curso
                 GLib.source_remove(armed[0])
@@ -4495,7 +4514,13 @@ class ThumbSheet(Gtk.Window):
             warn.set_xalign(0.0)
             box.pack_start(warn, False, False, 0)
             content_widgets.append(warn)
+        keys = Gtk.Label(label="Intro: cortar y borrar el original · Alt+T: sólo cortar · Esc: cancelar")
+        keys.set_xalign(0.0)
+        keys.get_style_context().add_class("dim-label")
+        box.pack_start(keys, False, False, 0)
+        content_widgets.append(keys)
         box.show_all()
+        log("cortar: diálogo %s" % doc.path.name)
         resp = dlg.run()
         use_exact = exact.get_active()
         if armed[0]:
@@ -4521,7 +4546,7 @@ class ThumbSheet(Gtk.Window):
             bar.show()
             for rid in (Gtk.ResponseType.ACCEPT, RESP_CUT_DELETE):
                 dlg.get_widget_for_response(rid).hide()
-            dlg.set_default_response(Gtk.ResponseType.CANCEL)
+            phase["running"] = True   # Intro ya no hace nada; Esc / Cancelar cancelan
             dlg.connect("response", lambda d, r: self._cut_cancel())
             self._cut["dlg"], self._cut["dlg_bar"] = dlg, bar
         else:
@@ -4664,7 +4689,7 @@ class ThumbSheet(Gtk.Window):
     # ---- eliminar -------------------------------------------------------------------------------
     def on_delete(self, *_):
         doc = self.current
-        if doc is None:
+        if doc is None or doc.deleting or self._cut is not None:
             return
         try:
             size = human_size(doc.path.stat().st_size)
@@ -4680,9 +4705,11 @@ class ThumbSheet(Gtk.Window):
         # el primer botón, «Cancelar», y Intro activa el botón con foco, no el de por defecto). Esc cancela.
         dlg.set_default_response(Gtk.ResponseType.ACCEPT)
         btn.grab_focus()
+        log("eliminar: diálogo %s" % doc.path.name)
         resp = dlg.run()
         dlg.destroy()
         if resp != Gtk.ResponseType.ACCEPT:
+            log("eliminar: cancelado")
             return
         self._delete_file(doc)
 
@@ -4887,14 +4914,18 @@ class ThumbSheet(Gtk.Window):
         else:
             self.sheet.set_cols(int(round(scale.get_value())))
 
-    def _wheel_steps(self, event, key):
-        """Pasos de rueda (+1 arriba / -1 abajo); con scroll suave acumula hasta completar un paso."""
-        if event.direction == Gdk.ScrollDirection.UP:
+    def _wheel_steps(self, event, key, sideways=False):
+        """Pasos de rueda (+1 arriba / -1 abajo); con scroll suave acumula hasta completar un paso. Con
+        `sideways`, el desplazamiento horizontal cuenta como vertical (izquierda = arriba): hay sistemas que
+        convierten Mayús+rueda en scroll horizontal."""
+        if event.direction == Gdk.ScrollDirection.UP or (sideways and event.direction == Gdk.ScrollDirection.LEFT):
             return 1
-        if event.direction == Gdk.ScrollDirection.DOWN:
+        if event.direction == Gdk.ScrollDirection.DOWN or (sideways and event.direction == Gdk.ScrollDirection.RIGHT):
             return -1
         if event.direction == Gdk.ScrollDirection.SMOOTH:
             _, dx, dy = event.get_scroll_deltas()
+            if sideways and not dy:
+                dy = dx
             acc = self._wheel_acc.get(key, 0.0) + dy
             if abs(acc) >= 1.0:
                 self._wheel_acc[key] = 0.0
@@ -4909,8 +4940,20 @@ class ThumbSheet(Gtk.Window):
         return True
 
     def on_scroll(self, widget, event):
+        """Zoom sobre el mosaico. Ctrl+rueda: tamaño de las teselas (arriba, más grandes). Ctrl+Mayús+rueda:
+        intervalo (arriba acerca: intervalo más corto, más teselas; abajo aleja). Cada paso de rueda mueve un
+        paso el slider correspondiente, con lo mismo que hace el slider (el intervalo se aplica con la misma
+        espera antes de regenerar, y la zona del vídeo a la vista se conserva)."""
         if not event.state & Gdk.ModifierType.CONTROL_MASK:
             return False
+        if event.state & Gdk.ModifierType.SHIFT_MASK:
+            n = self._wheel_steps(event, "interval", sideways=True)
+            if n:
+                i = int(round(self.interval_scale.get_value()))
+                j = max(0, min(len(INTERVALS) - 1, i - n))
+                if j != i:
+                    self.interval_scale.set_value(j)
+            return True
         n = self._wheel_steps(event, "sheet")
         if n:
             self.tile_scale.set_value(self.tile_scale.get_value() - n)
@@ -4965,6 +5008,17 @@ class ThumbSheet(Gtk.Window):
             return True
         if ctrl and event.keyval in (Gdk.KEY_minus, Gdk.KEY_KP_Subtract):
             self.tile_scale.set_value(self.tile_scale.get_value() + 1)
+            return True
+        # teclas sueltas (sin Ctrl/Alt/Super: Ctrl+C sigue copiando en el aviso de error). No hay campos de texto
+        # en la ventana, así que no le quitan nada a nadie. Sólo actúan si el botón correspondiente lo haría.
+        plain = not event.state & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK | Gdk.ModifierType.SUPER_MASK)
+        if plain and event.keyval in (Gdk.KEY_Delete, Gdk.KEY_KP_Delete):   # Supr = Eliminar (con su diálogo)
+            if self.del_btn.get_sensitive():
+                self.on_delete()
+            return True
+        if plain and event.keyval in (Gdk.KEY_c, Gdk.KEY_C):   # C = Cortar (con su diálogo); nunca cancela un corte en marcha
+            if self._cut is None and self.cut_btn.get_sensitive():
+                self.on_cut()
             return True
         return False
 

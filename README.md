@@ -1,10 +1,11 @@
 # thumbsheet
 
 Sábana de miniaturas de vídeo para Linux (GTK3). Abres uno o varios vídeos y aparece un mosaico con
-una captura cada N segundos. Controles: **Intervalo** (1 s, 2 s, 5, 10, 20, 30 s, 1, 5 o 10 min),
-**Tamaño** (teselas por fila, de 20 a la izquierda a 3 a la derecha: hacia la derecha, más grandes; el ancho se adapta a la ventana), y a la derecha del contador
-los botones **Cortar**, **Full**, **LLC** y **Eliminar**. Al cambiar el tamaño o el intervalo, la tesela que estaba
-en el centro del visor sigue en el centro.
+una captura cada N segundos. Controles, sin rótulos: el slider de intervalo (1 s, 2 s, 5, 10, 20, 30 s, 1, 5 o
+10 min, con sus marcas), el de tamaño (teselas por fila, de 20 a la izquierda a 3 a la derecha: hacia la derecha,
+más grandes; el ancho se adapta a la ventana), el toggle **Snap scroll** y, a la derecha del contador, los botones
+**Cortar**, **Full** y **Eliminar**. Al cambiar el tamaño o el intervalo, la tesela que estaba en el centro del
+visor sigue en el centro.
 
 ```
 thumbsheet vídeo.mp4 [otro.mkv ...]   # o "Abrir con" desde el gestor de archivos (admite varios)
@@ -68,8 +69,7 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   segmento. Por eso al cambiar el intervalo la selección no se trocea: al afinarlo (10 → 5 s) las
   teselas intermedias aparecen marcadas; al engrosarlo (5 → 10 s) se ven marcadas las teselas que tocan
   el segmento (15–25 s muestra 10 y 20), pero el segmento guardado no cambia y al volver a la rejilla
-  fina recupera sus bordes. El LLC exporta siempre los segmentos guardados, los precisos. Marcar o
-  desmarcar una tesela suma o resta su tramo. Se recuerda por vídeo entre sesiones (en la caché).
+  fina recupera sus bordes. Marcar o desmarcar una tesela suma o resta su tramo. Se recuerda por vídeo entre sesiones (en la caché).
 - **Clic derecho** sobre una tesela: vista ampliada a toda la ventana. Sale al instante la miniatura
   ampliada y en una fracción de segundo la sustituye el fotograma a resolución nativa, que ffmpeg
   extrae aparte y queda en la caché (`full/`). Flechas `←`/`→` pasan al fotograma anterior/siguiente
@@ -80,10 +80,6 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   flechas saltan ±intervalo, clic sobre el vídeo pausa/reanuda, `Esc` cierra. GStreamer elige solo el
   decodificador por hardware si lo hay (VA-API). Sin dispositivo de sonido, reproduce en silencio.
   `THUMBSHEET_AUDIO=0` silencia siempre.
-- **LLC**: guarda un proyecto de LosslessCut `<vídeo>-proj.llc` junto al vídeo, con un segmento por
-  cada racha de teselas seleccionadas (del instante de la primera al de la última más el intervalo).
-  Al abrir el vídeo en LosslessCut, los segmentos aparecen ya cargados. El fichero es JSON, válido
-  para el LosslessCut actual (JSON5, esquema v2) y para versiones antiguas (YAML).
 - **Full**: el vídeo entero vale tal cual: lo renombra a `<vídeo>-cortado.<ext>` (mismo contenedor, el
   contenido no se toca, como si se hubiera cortado de principio a fin) y lo quita de la lista, tras
   confirmar (Intro acepta, Esc cancela). Si ya existe ese nombre usa `-cortado-2`, `-cortado-3`… La caché de
@@ -112,7 +108,7 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
 - **Panel de segmentos** (derecha, plegable con el botón **Segmentos**): los tramos seleccionados en su
   orden de corte, cada uno con su primer y último fotograma, inicio y duración; la cabecera dice cuántos
   hay y cuánto suman. Arrastra una tarjeta (por cualquier punto menos la ×) para cambiar el orden, que es
-  el que usan Cortar y el proyecto LLC: mientras arrastras, las demás se deslizan para hacerle hueco y la
+  el que usa Cortar: mientras arrastras, las demás se deslizan para hacerle hueco y la
   tarjeta queda atenuada en el sitio donde va a caer (mitad superior de otra = delante de ella, mitad
   inferior = detrás; el hueco bajo la última = al final); al soltar se guarda ese orden, y Esc o soltar
   fuera lo deja como estaba. × quita el tramo; clic lleva el mosaico a ese instante. El orden se guarda
@@ -124,7 +120,7 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   (el fichero y su caché de miniaturas, que pueden ser miles) va en segundo plano: el diálogo se cierra al
   momento, la fila queda como "Eliminando…" y se pasa al siguiente vídeo; al terminar sale el toast y la
   fila desaparece.
-- **Avisos**: Cortar, LLC y Eliminar informan con un *toast* sobre el mosaico. Verde si ha ido bien,
+- **Avisos**: Cortar y Eliminar informan con un *toast* sobre el mosaico. Verde si ha ido bien,
   desaparece a los 3 s. Rojo si hubo un error: se queda hasta que lo cierres (`×` o `Esc`), con el texto
   seleccionable y un botón Copiar para pegar el mensaje donde haga falta.
 
@@ -133,12 +129,21 @@ La caché va por segundo, así que las capturas coincidentes entre intervalos se
 se tira nunca (vive en la caché de disco). Los intervalos de 1 y 2 s decodifican el vídeo entero por
 tramos (con GPU si la hay): en vídeos largos tardan.
 
-Los sliders aplican su valor al soltar el ratón (mientras arrastras sólo cambia la etiqueta); con la
+Los sliders aplican su valor al soltar el ratón (mientras arrastras sólo se mueve el slider); con la
 rueda o el teclado, al momento. Atajos: la rueda sobre cada slider mueve un paso; `Ctrl+rueda` sobre el mosaico o `Ctrl +/-` cambian
 las teselas por fila (rueda arriba, más grandes); `Ctrl+Mayús+rueda` sobre el mosaico cambia el intervalo (rueda
 arriba acerca: intervalo más corto, más teselas; abajo aleja), conservando la zona del vídeo a la vista como el
 slider; `C` abre Cortar (Intro en el diálogo = cortar y borrar original); `Supr` abre Eliminar (Intro confirma);
 `Ctrl+A` selecciona todo; `Esc` deselecciona; `Ctrl+Q` cierra.
+
+**Snap scroll** (toggle de la barra; se recuerda entre sesiones): el mosaico se desplaza por filas enteras. La
+primera fila a la vista queda siempre completa y en el mismo sitio que la primera del vídeo con el scroll arriba
+del todo, así que la rejilla no se mueve al desplazarse: sólo cambian las imágenes. La rueda baja o sube filas
+enteras, tantas como desplazaría normalmente y como mínimo una; arrastrando la barra de scroll, el mosaico avanza
+de fila en fila; y lo que mueve el scroll por su cuenta (centrar al cambiar tamaño o intervalo, ir a un segmento)
+acaba también en una fila entera. Para que la última parada deje ver el final, el mosaico gana al final un relleno
+en blanco de menos de una fila. En vídeos que cambian de orientación las filas no miden todas lo mismo: la fila de
+arriba sigue quedando entera y en su sitio, pero las de debajo caen donde les toca según su altura.
 
 ## Instalación (Ubuntu / Mint / Debian)
 

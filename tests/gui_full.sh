@@ -25,8 +25,8 @@ shown() { grep "\] vídeo: " "$OUT/app.log" | tail -1 | sed 's/.*vídeo: //; s/ 
 for i in $(seq 1 60); do [[ "$(grep -c "fin: " "$OUT/app.log" || true)" -ge 2 ]] && break; sleep 0.5; done   # los dos en caché
 sleep 0.5
 G=$(grep "geometry:" "$OUT/app.log" | tail -1); gv() { echo "$G" | sed -E "s/.* $1=([^ ]+).*/\1/"; }
-FX=$(gv full | cut -d, -f1); FY=$(gv full | cut -d, -f2); CX=$(gv cut | cut -d, -f1); LX=$(gv llc | cut -d, -f1)
-[[ "$FX" -gt "$CX" && "$FX" -lt "$LX" ]] && ok "botón Full entre Cortar y LLC (x: $CX < $FX < $LX)" || ko "posición de Full: cut=$CX full=$FX llc=$LX"
+FX=$(gv full | cut -d, -f1); FY=$(gv full | cut -d, -f2); CX=$(gv cut | cut -d, -f1); DX=$(gv del | cut -d, -f1)
+[[ "$FX" -gt "$CX" && "$FX" -lt "$DX" ]] && ok "botón Full entre Cortar y Eliminar (x: $CX < $FX < $DX)" || ko "posición de Full: cut=$CX full=$FX del=$DX"
 KEY1=$(ls "$OUT/cache/thumbsheet" | head -1); N1=$(ls "$OUT/cache/thumbsheet" | wc -l)
 # 1. Esc cancela
 xdotool mousemove $((X+FX)) $((Y+FY)) click 1; sleep 1; import -window root "$OUT/1-dialogo.png"

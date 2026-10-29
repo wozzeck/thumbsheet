@@ -7,6 +7,9 @@
   vídeo de 6 s con un color por segundo y keyframe cada segundo, comprueba que `expand_to_keyframes` mantiene el
   orden pedido (fundiendo sólo tramos consecutivos que se solapan en el tiempo) y corta de verdad en los dos modos
   (copia de streams y exacto) mirando el color de cada tramo del resultado.
+- `test_snap.py` — sin pantalla, instantáneo: paradas del «Snap scroll» (funciones `snap_*`): la parada más cercana,
+  la última necesaria para ver el final y el relleno que la convierte en tope, los pasos de rueda, filas de altura
+  propia (vídeos que cambian de orientación) y filas más altas que el visor (el final también es parada).
 - `test_llc.py` — sin pantalla, instantáneo: segmentos a partir de la selección, fichero `-proj.llc`
   y ajuste del intervalo a múltiplos de 5.
 - `test_damaged.py <vídeo mp4> [fracción]` — sin pantalla. Trunca una copia del vídeo (por defecto a la
@@ -43,6 +46,11 @@
   con uno abre el diálogo de corte, `Esc` lo cierra sin tocar nada y `C` + `Intro` corta y borra el original (en
   modo exacto, elegido con la flecha abajo, para que un segundo `Intro` llegue con el corte en marcha y se compruebe
   que no lo cancela); `Ctrl+C` no abre el diálogo; `Supr` abre Eliminar, `Esc` no borra y `Supr` + `Intro` borra.
+- `gui_snap.sh <vídeo A de unos minutos> [out]` — Xvfb propio (`:69`), una copia de A a 10 s. La barra ya no tiene LLC
+  y sí el toggle; sin snap la rueda va por píxeles; al activarlo salta a la fila entera más cercana y gana el relleno
+  final (menos de una fila); con snap, la rueda y el arrastre de la barra de scroll sólo se paran en filas enteras,
+  al final se ve la última fila y la rejilla sigue alineada, y Ctrl+rueda recentra en una parada de la rejilla nueva;
+  el toggle se guarda y al desactivarlo la rueda vuelve a ir por píxeles.
 - `gui_full.sh <vídeo A corto> [out]` — Xvfb propio (`:71`). Botón Full con dos copias de A: Esc en el diálogo no
   toca nada; Intro renombra a `-cortado.<ext>` sin cambiar el contenido (md5), quita el vídeo de la lista, pasa al
   siguiente, toast verde, mueve la caché a la clave del nombre nuevo y al reabrir el renombrado no regenera.
@@ -57,7 +65,7 @@
   También comprueba que la fila del panel de vídeos acaba con el tamaño del fichero.
 - `gui_smoke.sh <vídeo A> <vídeo B> [out]` — abre la app en un Xvfb propio (no toca tu pantalla) con
   COPIAS de A y de B (las dos se borran durante la prueba; los originales no se tocan), y con xdotool: rueda sobre el slider de intervalo, clic y arrastre de
-  teselas, botón LLC (verifica el proyecto), Cortar, cambio de vídeo, Escape, Cortar y borrar original
+  teselas, un corte que falla a propósito (toast rojo; Esc lo cierra), Cortar, cambio de vídeo, Escape, Cortar y borrar original
   (doble pulsación: comprueba que una sola o una tardía no borran), Eliminar con confirmación, Ctrl+Q, y
   SIGKILL en plena generación. Deja capturas PNG en `out`. Requiere `Xvfb`,
   `xdotool`, `import` (ImageMagick). Caché y ajustes van aislados en `out`.

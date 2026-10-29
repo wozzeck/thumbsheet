@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Humo de la GUI en un Xvfb propio (no toca el DISPLAY real). Abre COPIAS de los vídeos A y B (ambas se
 # borran durante la prueba; los originales no se tocan), y con
-# xdotool recorre: rueda sobre el slider de intervalo, clic/arrastre/Shift+clic/doble clic de teselas, LLC
-# (y un error forzado → toast rojo), Cortar sin pérdida, cambio de intervalo sin alterar segmentos, vista
+# xdotool recorre: rueda sobre el slider de intervalo, clic/arrastre/Shift+clic/doble clic de teselas, un corte que
+# falla a propósito (toast rojo, Esc lo cierra), Cortar sin pérdida, cambio de intervalo sin alterar segmentos, vista
 # ampliada (flechas, reproducción muda, seek), cambio de vídeo, centrado al cambiar columnas, Escape,
 # Cortar y borrar original (doble pulsación, desarme a los 5 s), Eliminar con confirmación, Ctrl+Q, y SIGKILL
 # en plena generación sin huérfanos. Capturas PNG en `out`.
@@ -38,7 +38,7 @@ gv() { echo "$G" | sed -E "s/.* $1=([^ ]+).*/\1/"; }
 SX=$(gv sheet | cut -d, -f1); SY=$(gv sheet | cut -d, -f2); COLS=$(gv cols); CW=$(gv cell | cut -dx -f1); CH=$(gv cell | cut -dx -f2); PAD=$(gv pad); GAP=$(gv gap)
 tile() { local r=$1 c=$2; echo "$((X+SX+PAD+c*(CW+GAP)+CW/2)) $((Y+SY+PAD+r*(CH+GAP)+CH/2))"; }
 IX=$(gv interval | cut -d, -f1); IY=$(gv interval | cut -d, -f2); TX=$(gv tile | cut -d, -f1); TY=$(gv tile | cut -d, -f2); TW=$(gv tilew)
-LX=$(gv llc | cut -d, -f1); LY=$(gv llc | cut -d, -f2); CX=$(gv cut | cut -d, -f1); CY=$(gv cut | cut -d, -f2); DX=$(gv del | cut -d, -f1); DY=$(gv del | cut -d, -f2)
+CX=$(gv cut | cut -d, -f1); CY=$(gv cut | cut -d, -f2); DX=$(gv del | cut -d, -f1); DY=$(gv del | cut -d, -f2)
 ROW1=$(gv rows | cut -d';' -f1); ROW2=$(gv rows | cut -d';' -f2)
 PITCH=$(( ${ROW2#*,} - ${ROW1#*,} )); [[ "$PITCH" -le 50 ]] && ok "fila del panel con tres líneas sin crecer ($PITCH px entre filas, antes 50)" || ko "la fila del panel ha crecido: $PITCH px entre filas"
 SEL="$OUT/cache/thumbsheet"
@@ -68,20 +68,17 @@ chk "segmentos = tesela (0,1) → $S0–$((2*S0)) s, fila 1 cols 0-3 → $A–$B
 xdotool mousemove $(tile 0 1) click 1; sleep 0.5
 E2=$(seg $A $B); chk "segundo clic deselecciona (queda $A–$B)" "$(sel)" "$E2"
 
-# 3. LLC: proyecto correcto, toast verde; error forzado (fichero de sólo lectura) → toast rojo, Esc lo cierra
-xdotool mousemove $((X+LX)) $((Y+LY)) click 1; sleep 1
-LLC="$OUT/video/copia-$(basename "${VIDEO_A%.*}")-proj.llc"
-if [[ -f "$LLC" ]]; then python3 -c "import json,sys; d=json.load(open(sys.argv[1])); assert d['version']==2 and d['cutSegments']==[{'start':int(sys.argv[2]),'end':int(sys.argv[3]),'name':''}], d" "$LLC" "$A" "$B" && ok "proyecto LLC con el segmento $A–$B" || ko "contenido LLC inesperado: $(tr -d '\n' < "$LLC")"; else ko "no existe $LLC"; fi
-shot 4-llc 0.5
-grep -q "toast ok: Proyecto LLC guardado" "$OUT/app.log" && ok "toast verde al guardar el LLC" || ko "sin toast ok del LLC"
-chmod a-w "$LLC"; xdotool mousemove $((X+LX)) $((Y+LY)) click 1; sleep 0.8; xdotool key alt+s; shot 4-llc-error 1
-grep -q "toast error: No se pudo guardar el proyecto LLC" "$OUT/app.log" && ok "toast rojo al fallar el LLC (permiso denegado)" || ko "sin toast de error del LLC"
-xdotool windowfocus --sync "$WID"; xdotool key Escape; sleep 0.4; chmod u+w "$LLC"
+# 3. error forzado al cortar (carpeta del vídeo de sólo lectura) → toast rojo; Esc lo cierra sin tocar la selección
+chmod a-w "$OUT/video"; xdotool mousemove $((X+CX)) $((Y+CY)) click 1; sleep 1; xdotool key alt+t
+for i in $(seq 1 40); do grep -q "cut: error\|cut: hecho" "$OUT/app.log" && break; sleep 0.25; done; shot 4-corte-error 0.5
+chmod u+w "$OUT/video"; NERR=$(grep -c "cut: error" "$OUT/app.log" || true)   # los pasos siguientes esperan errores NUEVOS
+grep -q "toast error: No se pudo cortar" "$OUT/app.log" && ok "toast rojo al fallar el corte (carpeta de sólo lectura)" || ko "sin toast de error del corte: $(grep 'cut:\|toast' "$OUT/app.log" | tail -1)"
+xdotool windowfocus --sync "$WID"; xdotool key Escape; sleep 0.4
 chk "Esc cierra el toast de error sin tocar la selección" "$(sel)" "$E2"
 
 # 4. Cortar sin pérdida: bordes a keyframes (cada 6 s en el vídeo de prueba)
 xdotool mousemove $((X+CX)) $((Y+CY)) click 1; shot 4a-dialogo-cortar 1; xdotool key alt+t   # Alt+T = sólo cortar (Intro es cortar y borrar)
-for i in $(seq 1 60); do grep -q "cut: hecho\|cut: error" "$OUT/app.log" && break; sleep 0.5; done
+for i in $(seq 1 60); do grep -q "cut: hecho" "$OUT/app.log" && break; [[ "$(grep -c "cut: error" "$OUT/app.log" || true)" -gt "$NERR" ]] && break; sleep 0.5; done
 CUT="$OUT/video/copia-$(basename "${VIDEO_A%.*}")-cortado.mp4"
 if [[ -f "$CUT" ]]; then CD=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$CUT"); python3 -c "import sys; d=float(sys.argv[1]); a=int(sys.argv[2]); b=int(sys.argv[3]); ea=a-a%6; eb=b+(-b)%6; sys.exit(0 if abs(d-(eb-ea))<=4 else 1)" "$CD" "$A" "$B" && ok "corte sin pérdida: $(basename "$CUT") dura ${CD%.*} s (keyframes alrededor de $A–$B)" || ko "duración del corte inesperada: $CD"; else ko "no existe $CUT: $(grep 'cut:' "$OUT/app.log" | tail -1)"; fi
 grep -q "toast ok: Cortado" "$OUT/app.log" && ok "toast verde al terminar el corte" || ko "sin toast ok del corte"
@@ -194,7 +191,7 @@ xdotool mousemove $((X+CX)) $((Y+CY)) click 1; sleep 1; xdotool key alt+b; shot 
 sleep 5.5; xdotool key alt+b; sleep 1
 [[ -n "$(dlg)" && -f "$COPY" ]] && ok "pasados 5 s se desarma: la pulsación tardía tampoco confirma" || ko "la pulsación tardía confirmó: diálogo='$(dlg)' original=$([[ -f "$COPY" ]] && echo sigue || echo BORRADO)"
 xdotool key alt+b
-for i in $(seq 1 60); do grep -q "cut: original borrado\|cut: error" "$OUT/app.log" && break; sleep 0.5; done
+for i in $(seq 1 60); do grep -q "cut: original borrado" "$OUT/app.log" && break; [[ "$(grep -c "cut: error" "$OUT/app.log" || true)" -gt "$NERR" ]] && break; sleep 0.5; done
 [[ ! -f "$COPY" && -f "$CUT" ]] && ok "segunda pulsación: corta y borra el original" || ko "cortar y borrar: original=$([[ -f "$COPY" ]] && echo sigue || echo borrado) corte=$([[ -f "$CUT" ]] && echo sí || echo no) · $(grep 'cut:' "$OUT/app.log" | tail -1)"
 grep -q "toast ok: Cortado.*original borrado" "$OUT/app.log" && ok "toast verde: cortado y original borrado" || ko "sin toast de cortado+borrado: $(grep 'toast' "$OUT/app.log" | tail -1)"
 sleep 0.5; [[ -z "$(dlg)" ]] && ok "el diálogo de corte se cierra al terminar el corte (el borrado sigue en segundo plano)" || ko "el diálogo de corte sigue abierto"

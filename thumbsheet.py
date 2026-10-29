@@ -1331,6 +1331,68 @@ class Loader(object):
 # ----------------------------------------------------------------------------------------------
 # el mosaico
 # ----------------------------------------------------------------------------------------------
+# ----------------------------------------------------------------------------------------------
+# «Snap scroll»: paradas del visor en filas enteras. Parada k = desplazamiento que deja la fila k arriba, en el mismo
+# sitio que la primera con el visor a cero: k·pitch en rejilla regular, tops[k] con filas de altura propia.
+# ----------------------------------------------------------------------------------------------
+def snap_index(v, n, pitch, tops=None):
+    """Fila (0..n-1) cuya parada está más cerca del desplazamiento v."""
+    if n <= 0:
+        return 0
+    if tops is None:
+        k = int(round(v / float(pitch)))
+    else:
+        i = bisect.bisect_left(tops, v)
+        k = i if i < n and (i == 0 or tops[i] - v < v - tops[i - 1]) else i - 1
+    return max(0, min(n - 1, k))
+
+
+def snap_top(k, pitch, tops=None):
+    return tops[k] if tops is not None else k * pitch
+
+
+def snap_last(n, pitch, natural_h, page, tops=None):
+    """Última parada necesaria: la primera fila que, puesta arriba, deja ver el final del contenido."""
+    need = natural_h - page
+    if n <= 0 or need <= 0:
+        return 0
+    k = int(math.ceil(need / float(pitch))) if tops is None else bisect.bisect_left(tops, need)
+    return min(n - 1, k)
+
+
+def snap_target(v, n, pitch, natural_h, page, tops=None):
+    """La parada más cercana a v, sin pasar de la última necesaria. Si una fila es más alta que el visor (ventana
+    diminuta), el final del contenido también es parada, para poder verlo."""
+    if n <= 0:
+        return 0.0
+    k = min(snap_index(v, n, pitch, tops), snap_last(n, pitch, natural_h, page, tops))
+    t = float(snap_top(k, pitch, tops))
+    end = natural_h - page
+    if k == n - 1 and end > t + 0.5 and abs(v - end) < abs(v - t):
+        t = float(end)
+    return t
+
+
+def snap_step(v, rows, n, pitch, natural_h, page, tops=None):
+    """Parada a `rows` filas (positivo = bajar) de la más cercana a v, sin salir de [0, última necesaria]."""
+    if n <= 0:
+        return 0.0
+    last = snap_last(n, pitch, natural_h, page, tops)
+    k = max(0, min(last, min(snap_index(v, n, pitch, tops), last) + rows))
+    t = float(snap_top(k, pitch, tops))
+    end = natural_h - page
+    if rows > 0 and k == n - 1 and end > t + 0.5:
+        t = float(end)
+    return t
+
+
+def snap_height(n, pitch, natural_h, page, tops=None):
+    """Alto del contenido con el relleno justo para que la última parada sea también el tope del scroll."""
+    if n <= 0 or page <= 0 or natural_h <= page:
+        return natural_h   # sin visor todavía, o todo cabe: no hay scroll que alinear
+    return max(natural_h, int(math.ceil(snap_top(snap_last(n, pitch, natural_h, page, tops), pitch, tops) + page)))
+
+
 class Sheet(Gtk.DrawingArea):
     GAP = 6
     PAD = 8
@@ -1382,6 +1444,11 @@ class Sheet(Gtk.DrawingArea):
         self._prev_visible = None     # para pedir la precarga sólo cuando el visor se ha movido
         self._fill_core = None        # DEBUG: medir cuánto tarda en completarse la pantalla tras un salto
         self._fill_t0 = None
+        self.snap = False             # «Snap scroll»: el visor sólo se para con una fila entera arriba (snap_value)
+        self._snapping = False
+        self._snap_id = None
+        self._snap_tops = None        # filas de altura propia: desplazamiento del visor que deja cada fila arriba
+        self._natural_h = 2 * self.PAD   # alto del contenido, sin el relleno final que añade el modo snap
         self.connect("draw", self.on_draw)
         self.connect("size-allocate", self._on_size_allocate)
         self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK |
@@ -1734,10 +1801,102 @@ class Sheet(Gtk.DrawingArea):
                 y += h + self.GAP
             self.row_y, self.row_h, self.tile_x, self.tile_w = row_y, row_h, tile_x, tile_w
             total_h = int(math.ceil(2 * self.PAD + y - self.GAP)) if rows else 2 * self.PAD
-        if self.get_size_request()[1] != total_h:
-            self.set_size_request(-1, total_h)
+        # paradas del modo snap: en rejilla regular salen de la cuenta (fila k = k·(alto+hueco)); con filas de
+        # altura propia, del mismo redondeo con que se dibujan (_tile_rect)
+        self._snap_tops = [int(round(v)) for v in self.row_y] if self.row_y is not None else None
+        self._natural_h = total_h
+        self._apply_height()
+        if self.snap:
+            self._snap_soon()   # las filas pueden haber cambiado de sitio: volver a una parada
         if changed:
             self.queue_draw()
+
+    # --- «Snap scroll»: el visor se para sólo donde una fila entera queda arriba, en el mismo sitio que la
+    #     primera con el visor a cero; así la rejilla no se mueve al desplazarse (salvo filas de distinta altura) ---
+    def set_vadj(self, adj):
+        self.vadj = adj
+        adj.connect("value-changed", self._on_vadj_value)
+        adj.connect("changed", self._on_vadj_changed)   # alto del visor o del contenido: recalcular el relleno
+
+    def set_snap(self, on):
+        on = bool(on)
+        if on == self.snap:
+            return
+        self.snap = on
+        log("snap: %s" % ("activado" if on else "desactivado"))
+        self._apply_height()
+        if on:
+            self._snap_soon()
+
+    def _snap_rows(self):
+        if self._snap_tops is not None:
+            return len(self._snap_tops)
+        return int(math.ceil(len(self.ts) / float(self.cols))) if self.ts else 0
+
+    def _snap_args(self):
+        """(n, pitch, alto del contenido, alto del visor, tops) para las funciones snap_*."""
+        page = self.vadj.get_page_size() if self.vadj is not None else 0
+        return self._snap_rows(), self.cell_h + self.GAP, self._natural_h, page, self._snap_tops
+
+    def snap_value(self, v):
+        return snap_target(v, *self._snap_args())
+
+    def snap_scroll(self, steps):
+        """Rueda en modo snap: cada paso baja (steps > 0) o sube filas enteras, tantas como desplazaría la rueda
+        normal de GTK (página^(2/3) píxeles), y como mínimo una."""
+        if self.vadj is None or not self.ts:
+            return
+        n, pitch, natural_h, page, tops = self._snap_args()
+        per = max(1, int(round(page ** (2.0 / 3.0) / float(pitch)))) if page > 0 else 1
+        self.vadj.set_value(snap_step(self.vadj.get_value(), steps * per, n, pitch, natural_h, page, tops))
+
+    def _apply_height(self):
+        """Alto pedido: el del contenido; con snap, más el relleno justo para que la última parada sea también el
+        tope del scroll (queda menos de una fila en blanco al final)."""
+        n, pitch, natural_h, page, tops = self._snap_args()
+        h = snap_height(n, pitch, natural_h, page, tops) if self.snap and self.ts else natural_h
+        if self.get_size_request()[1] != h:
+            self.set_size_request(-1, h)
+            if self.snap:
+                log("snap: alto %d (contenido %d, visor %d)" % (h, self._natural_h, page))
+
+    def _on_vadj_changed(self, adj):
+        if self.snap:
+            self._snap_soon()
+
+    def _snap_soon(self):
+        if self._snap_id is None:
+            self._snap_id = GLib.idle_add(self._snap_now)
+
+    def _snap_now(self):
+        self._snap_id = None
+        if self.snap and self.vadj is not None:
+            self._apply_height()
+            self._on_vadj_value(self.vadj)
+        return False
+
+    def _on_vadj_value(self, adj):
+        """Cualquier desplazamiento (barra, centrado al cambiar tamaño o intervalo, ir a un segmento...) acaba en la
+        parada más cercana. Arrastrando la barra, la rejilla avanza de fila en fila."""
+        if self._snapping:
+            return
+        v = adj.get_value()
+        if not self.snap or not self.ts:
+            if DEBUG:
+                log("vscroll: %.1f" % v)
+            return
+        t = self.snap_value(v)
+        if abs(t - v) >= 0.5:
+            self._snapping = True
+            try:
+                adj.set_value(t)
+            finally:
+                self._snapping = False
+        if DEBUG:
+            n, pitch, _h, _p, tops = self._snap_args()
+            log("vscroll: %.1f -> %d (snap, fila %d, paso %s)" % (
+                v, int(round(adj.get_value())), snap_index(adj.get_value(), n, pitch, tops),
+                pitch if tops is None else "variable"))
 
     def _tiles_in_rect(self, x1, y1, x2, y2):
         """Índices de las teselas que tocan el rectángulo (coordenadas del mosaico)."""
@@ -3341,7 +3500,6 @@ class ThumbSheet(Gtk.Window):
         bar.set_margin_bottom(6)
         vbox.pack_start(bar, False, False, 0)
 
-        bar.pack_start(Gtk.Label(label="Intervalo"), False, False, 0)
         # el slider de intervalo recorre posiciones de INTERVALS (0..n-1), con marcas rotuladas
         self.interval_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, len(INTERVALS) - 1, 1)
         self.interval_scale.set_draw_value(False)
@@ -3353,14 +3511,9 @@ class ThumbSheet(Gtk.Window):
         self.interval_scale.set_tooltip_text("Tiempo entre capturas: 1 s, 2 s, 5 s, 10 s, 20 s, 30 s, 1, 5 o 10 min (rueda = un paso; "
                                              "Ctrl+Mayús+rueda sobre el mosaico: arriba acerca, abajo aleja)")
         bar.pack_start(self.interval_scale, True, True, 0)
-        self.interval_label = Gtk.Label(label="")
-        self.interval_label.set_width_chars(6)
-        self.interval_label.set_xalign(0.0)
-        bar.pack_start(self.interval_label, False, False, 0)
 
         bar.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 6)
 
-        bar.pack_start(Gtk.Label(label="Tamaño"), False, False, 0)
         self.tile_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, COLS_MIN, COLS_MAX, 1)
         self.tile_scale.set_draw_value(False)
         self.tile_scale.set_round_digits(0)
@@ -3372,14 +3525,17 @@ class ThumbSheet(Gtk.Window):
         self.tile_scale.set_tooltip_text("Teselas por fila, de 20 a 3: hacia la derecha, más grandes "
                                          "(rueda = un paso; Ctrl+rueda sobre el mosaico)")
         bar.pack_start(self.tile_scale, True, True, 0)
-        self.tile_label = Gtk.Label(label="")
-        self.tile_label.set_width_chars(10)
-        self.tile_label.set_xalign(0.0)
-        bar.pack_start(self.tile_label, False, False, 0)
 
         bar.pack_start(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL), False, False, 6)
 
-        # derecha: [contador] [LLC] [Eliminar]
+        self.snap_btn = Gtk.ToggleButton(label="Snap scroll")
+        self.snap_btn.set_tooltip_text("Desplazar por filas enteras: la primera fila a la vista queda siempre completa y en el "
+                                       "mismo sitio, así la rejilla no se mueve al hacer scroll (salvo filas de distinta altura, "
+                                       "en vídeos que cambian de orientación)")
+        self.snap_btn.set_active(bool(self.settings.get("snap", False)))
+        bar.pack_start(self.snap_btn, False, False, 0)
+
+        # derecha: [contador] [Cortar] [Full] [Eliminar] [Segmentos]
         self.del_btn = Gtk.Button(label="Eliminar")
         self.del_btn.get_style_context().add_class("destructive-action")
         self.del_btn.set_tooltip_text("Borrar el archivo de vídeo del disco (sin papelera), tras confirmar (Supr; Intro confirma)")
@@ -3390,20 +3546,15 @@ class ThumbSheet(Gtk.Window):
         self.seg_btn.set_active(bool(self.settings.get("segpanel", True)))
         bar.pack_end(self.seg_btn, False, False, 0)
         bar.pack_end(self.del_btn, False, False, 0)
-        self.llc_btn = Gtk.Button(label="LLC")
         self.cut_btn = Gtk.Button(label="Cortar")
         self.cut_btn.set_tooltip_text("Cortar los segmentos seleccionados y unirlos en <vídeo>-cortado (sin pérdida, en keyframes; "
                                       "o exacto recodificando). Tecla C; en el diálogo, Intro corta y borra el original")
         self.cut_btn.connect("clicked", self.on_cut)
         self._cut = None
-        self.llc_btn.set_tooltip_text("Guardar un proyecto de LosslessCut (<vídeo>-proj.llc, junto al vídeo) con un segmento "
-                                      "por cada racha de teselas seleccionadas")
-        self.llc_btn.connect("clicked", self.on_llc)
         self.full_btn = Gtk.Button(label="Full")
         self.full_btn.set_tooltip_text("Dar por bueno el vídeo entero: lo renombra como <vídeo>-cortado (sin tocar el "
                                        "contenido, como si se hubiera cortado de principio a fin) y lo quita de la lista")
         self.full_btn.connect("clicked", self.on_full)
-        bar.pack_end(self.llc_btn, False, False, 0)
         bar.pack_end(self.full_btn, False, False, 0)
         bar.pack_end(self.cut_btn, False, False, 0)
         # mensaje arriba, barra de progreso abajo (generación en curso o en segundo plano, o corte)
@@ -3486,7 +3637,9 @@ class ThumbSheet(Gtk.Window):
         self.scroller.get_style_context().add_class("ts-sheet-scroll")
         self.sheet = Sheet()
         self.sheet.set_cols(cols)
-        self.sheet.vadj = self.scroller.get_vadjustment()
+        self.sheet.set_vadj(self.scroller.get_vadjustment())
+        self.sheet.set_snap(self.snap_btn.get_active())
+        self.snap_btn.connect("toggled", lambda b: self.sheet.set_snap(b.get_active()))
         self.sheet.on_drag_begin = self.on_drag_begin
         self.sheet.on_drag_apply = self.on_drag_apply
         self.sheet.on_drag_end = self.on_drag_end
@@ -3500,7 +3653,7 @@ class ThumbSheet(Gtk.Window):
         self.interval_scale.connect("scroll-event", self._slider_scroll, 1)
         self.tile_scale.connect("value-changed", self.on_tile_changed)
         self.tile_scale.connect("scroll-event", self._slider_scroll, -1)   # rueda arriba = teselas más grandes
-        # arrastrando con el ratón, el valor se aplica al soltar (la etiqueta sí va cambiando); con la rueda
+        # arrastrando con el ratón, el valor se aplica al soltar; con la rueda
         # o el teclado, que son pasos sueltos, al momento
         self._slider_drag = set()
         for sc in (self.interval_scale, self.tile_scale):
@@ -3515,7 +3668,6 @@ class ThumbSheet(Gtk.Window):
         self.drag_dest_set(Gtk.DestDefaults.ALL, [], Gdk.DragAction.COPY)
         self.drag_dest_add_uri_targets()
         self.connect("drag-data-received", self.on_drag_data)
-        self._update_labels()
 
         # sondeo de vídeos en un hilo (ffprobe), de uno en uno
         self._probe_q = queue.Queue()
@@ -3563,10 +3715,15 @@ class ThumbSheet(Gtk.Window):
             return "%d,%d" % (x + a.width // 2, y + a.height // 2)
         sx, sy = origin(self.sheet)
         rows = ";".join(center(d.row) for d in self.docs if d.row is not None)
-        log("geometry: sheet=%d,%d cols=%d cell=%dx%d pad=%d gap=%d interval=%s tile=%s tilew=%d llc=%s cut=%s del=%s full=%s rows=%s" % (
-            sx, sy, self.sheet.cols, self.sheet.cell_w, self.sheet.cell_h, Sheet.PAD, Sheet.GAP,
-            center(self.interval_scale), center(self.tile_scale), self.tile_scale.get_allocation().width,
-            center(self.llc_btn), center(self.cut_btn), center(self.del_btn), center(self.full_btn), rows))
+        vb = self.scroller.get_vscrollbar()
+        bx, by = origin(vb)
+        ba = vb.get_allocation()
+        log("geometry: sheet=%d,%d cols=%d cell=%dx%d pad=%d gap=%d interval=%s tile=%s tilew=%d cut=%s del=%s full=%s "
+            "snap=%s vbar=%d,%d,%d rows=%s" % (
+                sx, sy, self.sheet.cols, self.sheet.cell_w, self.sheet.cell_h, Sheet.PAD, Sheet.GAP,
+                center(self.interval_scale), center(self.tile_scale), self.tile_scale.get_allocation().width,
+                center(self.cut_btn), center(self.del_btn), center(self.full_btn), center(self.snap_btn),
+                bx + ba.width // 2, by, ba.height, rows))
         return False
 
     # ---- documentos --------------------------------------------------------------------------
@@ -4094,7 +4251,6 @@ class ThumbSheet(Gtk.Window):
         self.del_btn.set_sensitive(doc is not None and self._cut is None)
         self.full_btn.set_sensitive(doc is not None and self._cut is None and not doc.deleting)
         has_segs = bool(doc is not None and doc.info is not None and self._segments())
-        self.llc_btn.set_sensitive(has_segs)
         self.cut_btn.set_sensitive(has_segs or self._cut is not None)
         self.cut_btn.set_label("Cancelar" if self._cut is not None else "Cortar")
 
@@ -4404,31 +4560,6 @@ class ThumbSheet(Gtk.Window):
         self._flash("No se pudo reproducir: %s" % message)
         self._stop_player()
         self.layer.stack.set_visible_child_name("still")
-
-    # ---- LLC ------------------------------------------------------------------------------------
-    def on_llc(self, *_):
-        doc = self.current
-        segs = self._segments()
-        if not doc or not segs:
-            return
-        proj = llc_project_path(doc.path)
-        if proj.exists():
-            dlg = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
-                                    buttons=Gtk.ButtonsType.NONE, text="Ya existe un proyecto de LosslessCut para este vídeo")
-            dlg.format_secondary_text("%s\n\n¿Sobrescribirlo con los %d segmentos seleccionados?" % (proj.name, len(segs)))
-            dlg.add_button("_Cancelar", Gtk.ResponseType.CANCEL)
-            dlg.add_button("_Sobrescribir", Gtk.ResponseType.ACCEPT)
-            dlg.set_default_response(Gtk.ResponseType.CANCEL)
-            resp = dlg.run()
-            dlg.destroy()
-            if resp != Gtk.ResponseType.ACCEPT:
-                return
-        try:
-            write_llc_project(doc.path, segs)
-        except OSError as e:
-            self._error("No se pudo guardar el proyecto LLC", "%s\n%s" % (proj, e))
-            return
-        self._flash("Proyecto LLC guardado: %s · %d segmento%s" % (proj.name, len(segs), "" if len(segs) == 1 else "s"))
 
     # ---- cortar y unir ----------------------------------------------------------------------------
     def on_cut(self, *_):
@@ -4878,21 +5009,15 @@ class ThumbSheet(Gtk.Window):
         i = int(round(self.interval_scale.get_value()))
         return INTERVALS[max(0, min(len(INTERVALS) - 1, i))]
 
-    def _update_labels(self):
-        self.interval_label.set_text(fmt_interval(self.current_interval()))
-        self.tile_label.set_text("%d por fila" % int(round(self.tile_scale.get_value())))
-
     def on_interval_changed(self, scale):
         v = scale.get_value()
         if abs(v - round(v)) > 1e-6:
             scale.set_value(round(v))   # re-entra ya en una posición entera (clic en la pista, arrastre fino...)
             return
-        self._update_labels()
         if scale not in self._slider_drag:
             self._apply_slider(scale)
 
     def on_tile_changed(self, scale):
-        self._update_labels()
         if scale not in self._slider_drag:
             self._apply_slider(scale)
 
@@ -4940,12 +5065,19 @@ class ThumbSheet(Gtk.Window):
         return True
 
     def on_scroll(self, widget, event):
-        """Zoom sobre el mosaico. Ctrl+rueda: tamaño de las teselas (arriba, más grandes). Ctrl+Mayús+rueda:
+        """Rueda sobre el mosaico. Sin Ctrl: desplazar (GTK; con «Snap scroll», filas enteras). Zoom:
+        Ctrl+rueda: tamaño de las teselas (arriba, más grandes). Ctrl+Mayús+rueda:
         intervalo (arriba acerca: intervalo más corto, más teselas; abajo aleja). Cada paso de rueda mueve un
         paso el slider correspondiente, con lo mismo que hace el slider (el intervalo se aplica con la misma
         espera antes de regenerar, y la zona del vídeo a la vista se conserva)."""
         if not event.state & Gdk.ModifierType.CONTROL_MASK:
-            return False
+            if not self.sheet.snap:
+                return False
+            # «Snap scroll»: la rueda mueve filas enteras (GTK desplazaría píxeles sueltos)
+            n = self._wheel_steps(event, "snap")
+            if n:
+                self.sheet.snap_scroll(-n)   # rueda arriba (+1) = subir
+            return True
         if event.state & Gdk.ModifierType.SHIFT_MASK:
             n = self._wheel_steps(event, "interval", sideways=True)
             if n:
@@ -5050,6 +5182,7 @@ class ThumbSheet(Gtk.Window):
             "cols": int(round(self.tile_scale.get_value())),
             "win_w": w, "win_h": h, "maximized": self._maximized,
             "panel_w": self.paned.get_position(), "segpanel": self.seg_btn.get_active(),
+            "snap": self.snap_btn.get_active(),
         })
         save_settings(settings)
         Gtk.main_quit()

@@ -81,19 +81,44 @@ def is_video_name(name):
     return not name.startswith(".") and os.path.splitext(name)[1].lower() in VIDEO_EXT
 
 
-def find_videos(dirs):
+def walk_videos(dirs):
     """Ficheros soportados (por extensión, sin distinguir mayúsculas) dentro de esas carpetas y todas sus
-    subcarpetas, en orden natural por ruta. Se saltan los nombres que empiezan por punto y no se siguen enlaces a
-    carpetas (bucles). Puede tardar en carpetas remotas: llamar desde un hilo."""
-    found = []
+    subcarpetas, en orden natural por ruta, y las carpetas recorridas (cada raíz y todas sus subcarpetas, también
+    las vacías: son las que vigila la vigilancia). Se saltan los nombres que empiezan por punto y no se siguen
+    enlaces a carpetas (bucles). Puede tardar en carpetas remotas: llamar desde un hilo."""
+    found, seen = [], []
     for d in dirs:
         for root, subdirs, files in os.walk(str(d)):
             subdirs[:] = [x for x in subdirs if not x.startswith(".")]
+            seen.append(pathlib.Path(root))
             for f in files:
                 if is_video_name(f):
                     found.append(pathlib.Path(root) / f)
     found.sort(key=lambda q: [natural_key(part) for part in q.parts])
-    return found
+    return found, seen
+
+
+def find_videos(dirs):
+    """Sólo los vídeos de walk_videos."""
+    return walk_videos(dirs)[0]
+
+
+def is_cut_name(path):
+    """Vídeo ya procesado: el resultado de Cortar o de Full (<nombre>-cortado, -cortado-2…)."""
+    return re.search(r"-cortado(-\d+)?$", pathlib.Path(path).stem) is not None
+
+
+def pick_next(items, pos, usable):
+    """A qué vídeo pasar al borrar, procesar u ocultar uno: el primero de items[pos:] que cumpla `usable` o, si no queda
+    ninguno después, el último de antes que la cumpla; None si no hay. Las filas de carpeta no están en `items` y los
+    ocultos no cumplen `usable`: se saltan."""
+    for d in items[pos:]:
+        if usable(d):
+            return d
+    for d in reversed(items[:pos]):
+        if usable(d):
+            return d
+    return None
 
 
 _PROF = {}
@@ -2867,14 +2892,25 @@ def cut_command_exact(video_path, segments, out_path, tmp_path, has_audio):
 # ----------------------------------------------------------------------------------------------
 # documento = un vídeo abierto (sondeo, caché, selección, posición de scroll)
 # ----------------------------------------------------------------------------------------------
+PANEL_INDENT = 14                      # píxeles de sangría por nivel del árbol del panel
+EYE_OPEN, EYE_CLOSED = "view-reveal-symbolic", "view-conceal-symbolic"
+
+
+def icon_or_text(name, text):
+    """Imagen del tema de iconos si lo tiene; si no (temas viejos), un texto."""
+    if Gtk.IconTheme.get_default().has_icon(name):
+        return Gtk.Image.new_from_icon_name(name, Gtk.IconSize.MENU)
+    return Gtk.Label(label=text)
+
+
 def sub_markup(text):
     """Líneas secundarias del panel (ruta, duración…): letra pequeña para que quepan tres líneas por fila."""
     return '<span size="x-small">%s</span>' % GLib.markup_escape_text(text)
 
 
-def short_dir(path):
-    """Directorio del vídeo con el home abreviado a ~."""
-    d, home = str(path.parent), str(HOME)
+def short_path(d):
+    """Carpeta con el home abreviado a ~."""
+    d, home = str(d), str(HOME)
     if d == home:
         return "~"
     if d.startswith(home + os.sep):
@@ -3368,6 +3404,8 @@ class Document(object):
         self.bg_tried = None                  # intervalo para el que ya se intentó generar en segundo plano
         self.deleting = False                 # borrado en marcha (hilo aparte): fila insensible, no se genera
         self.row = None
+        self.folder = None                    # carpeta del panel (raíz o subcarpeta) bajo la que está su fila
+        self.hidden = False                   # oculto por el ojo de su carpeta (ya cortado): ni a la vista ni en 2.º plano
         self.lock = threading.Lock()
 
     def ensure_info(self):
@@ -3420,6 +3458,51 @@ class Document(object):
                                     human_size(self.info.size))
 
 
+class Folder(object):
+    """Carpeta del panel. Raíz (`root` es None): una que se añadió (argumento, botón de carpeta, arrastre) o la del
+    vídeo que se añadió suelto; su fila lleva el ojo (ocultar los vídeos ya cortados) y la vigilancia (cargar los
+    vídeos que aparezcan), y los dos valen para todo su árbol. Subcarpeta (`root` = su raíz): sólo se ve mientras le
+    quede algún vídeo a la vista; su fila dice la ruta relativa a la raíz. Las carpetas sin vídeos no tienen fila."""
+    def __init__(self, path, root=None, order=0):
+        self.path = path
+        self.root = root
+        self.order = order                    # raíz: orden de llegada; con ella se ordena el panel y no cambia
+        parts = path.relative_to(root.path).parts if root is not None else ()
+        self.rel = ([natural_key(p) for p in parts], "/".join(parts))
+        self.docs = []                        # vídeos directamente en ella, por orden de llegada
+        self.seq = 0                          # vídeos que han entrado en ella (su clave de orden: el de llegada)
+        self.subs = []                        # raíz: subcarpetas (Folder) en orden natural por ruta relativa
+        self.hide_done = False                # ojo activo: los -cortado del árbol, ocultos
+        self.watch = False                    # vigilancia del árbol activa
+        self.monitors = {}                    # raíz: carpeta vigilada → Gio.FileMonitor
+        self.watch_gen = 0                    # raíz: activaciones; el recorrido de una activación vieja se descarta
+        self.row = None
+        self.eye_btn = self.watch_btn = self.count_label = None
+
+    @property
+    def name(self):
+        return self.path.name or str(self.path)
+
+    def sort_key(self):
+        """Clave de orden de la fila de carpeta (ver doc_key)."""
+        r = self.root
+        return (self.order, 0) if r is None else (r.order, 2, self.rel, 0)
+
+    def doc_key(self, seq):
+        """Clave de orden del vídeo número `seq` de esta carpeta: la raíz, luego sus vídeos directos por orden de
+        llegada, luego cada subcarpeta (en orden natural por ruta) con los suyos."""
+        r = self.root
+        return (self.order, 1, seq) if r is None else (r.order, 2, self.rel, 1, seq)
+
+    def all_docs(self):
+        """Raíz: sus vídeos y los de sus subcarpetas, en el orden del panel."""
+        for d in self.docs:
+            yield d
+        for s in self.subs:
+            for d in s.docs:
+                yield d
+
+
 # ----------------------------------------------------------------------------------------------
 # ventana
 # ----------------------------------------------------------------------------------------------
@@ -3452,7 +3535,12 @@ class ThumbSheet(Gtk.Window):
     def __init__(self, video_paths):
         super(ThumbSheet, self).__init__()
         self.settings = load_settings()
-        self.docs = []
+        self.docs = []                        # todos los vídeos del panel, en su orden (las carpetas: self.roots)
+        self._keys = []                       # clave de orden de cada uno (paralelo a docs)
+        self._by_path = {}                    # ruta → Document: no repetir, y la vigilancia sabe qué hay cargado
+        self.roots = []                       # carpetas raíz del panel (Folder), por orden de llegada
+        self._own_outputs = set()             # lo que escribe esta app (-cortado): la vigilancia no lo carga
+        self._geom_id = None                  # DEBUG: geometría pendiente de registrar
         self._scanning = 0                    # carpetas recorriéndose en segundo plano
         self._probing = None                  # documento que el hilo de sondeo está analizando ahora (ffprobe)
         self._probe_batch = 0                 # ficheros encolados al sondeo desde la última vez que se vació
@@ -3607,7 +3695,9 @@ class ThumbSheet(Gtk.Window):
         side.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
         self.listbox = Gtk.ListBox()
         self.listbox.set_selection_mode(Gtk.SelectionMode.BROWSE)
+        self.listbox.set_sort_func(self._row_compare)   # carpetas y vídeos por su clave (Folder.doc_key)
         self.listbox.connect("row-selected", self.on_row_selected)
+        self.listbox.connect("move-cursor", self._on_move_cursor)
         side.add(self.listbox)
         self.count_label = Gtk.Label(label="")
         self.count_label.set_xalign(0.0)
@@ -3714,22 +3804,47 @@ class ThumbSheet(Gtk.Window):
             a = w.get_allocation()
             return "%d,%d" % (x + a.width // 2, y + a.height // 2)
         sx, sy = origin(self.sheet)
-        rows = ";".join(center(d.row) for d in self.docs if d.row is not None)
+        rows = ";".join(center(d.row) for d in self.docs if d.row is not None and not d.hidden)
+        first = self.roots[0] if self.roots else None   # ojo y vigilancia de la primera carpeta raíz
         vb = self.scroller.get_vscrollbar()
         bx, by = origin(vb)
         ba = vb.get_allocation()
         log("geometry: sheet=%d,%d cols=%d cell=%dx%d pad=%d gap=%d interval=%s tile=%s tilew=%d cut=%s del=%s full=%s "
-            "snap=%s vbar=%d,%d,%d rows=%s" % (
+            "snap=%s vbar=%d,%d,%d eye=%s watch=%s rows=%s" % (
                 sx, sy, self.sheet.cols, self.sheet.cell_w, self.sheet.cell_h, Sheet.PAD, Sheet.GAP,
                 center(self.interval_scale), center(self.tile_scale), self.tile_scale.get_allocation().width,
                 center(self.cut_btn), center(self.del_btn), center(self.full_btn), center(self.snap_btn),
-                bx + ba.width // 2, by, ba.height, rows))
+                bx + ba.width // 2, by, ba.height,
+                center(first.eye_btn) if first else "-", center(first.watch_btn) if first else "-", rows))
         return False
+
+    def _geometry_soon(self):
+        """DEBUG: volver a registrar la geometría (el panel ha cambiado de filas) cuando GTK haya recolocado."""
+        if DEBUG and self._geom_id is None:
+            self._geom_id = GLib.timeout_add(300, self._geometry_now)
+
+    def _geometry_now(self):
+        self._geom_id = None
+        self._log_geometry()
+        return False
+
+    def _log_panel(self):
+        """DEBUG: el árbol del panel en una línea («raíz: a, b | sub: c»; ~ delante de lo oculto)."""
+        def names(f):
+            return ", ".join(("~" if d.hidden else "") + d.path.name for d in f.docs)
+        parts = []
+        for r in self.roots:
+            parts.append("%s: %s" % (r.name, names(r)))
+            for s in r.subs:
+                shown = s.row is not None and s.row.get_visible()
+                parts.append("%s%s: %s" % ("" if shown else "~", s.rel[1], names(s)))
+        log("panel: " + " | ".join(parts))
 
     # ---- documentos --------------------------------------------------------------------------
     def add_paths(self, paths):
-        """Ficheros se añaden ya; las carpetas se recorren (con subcarpetas) en un hilo y entran cuando acaba."""
-        first_new = None
+        """Ficheros se añaden ya, cada uno bajo su carpeta del panel (con fila de carpeta nueva si hace falta), detrás de
+        los que ya tuviera; las carpetas se recorren (con subcarpetas) en un hilo y entran cuando acaba."""
+        new = []
         dirs = []
         for path in paths:
             try:
@@ -3739,33 +3854,103 @@ class ThumbSheet(Gtk.Window):
             if rp.is_dir():
                 dirs.append(rp)
                 continue
-            if not rp.is_file() or any(d.path == rp for d in self.docs):
+            if not rp.is_file() or rp in self._by_path:
                 continue
             doc = Document(rp)
-            self.docs.append(doc)
-            doc.row = self._make_row(doc)
-            self.listbox.add(doc.row)
-            doc.row.show_all()
+            self._attach_doc(doc)
+            new.append(doc)
             self._probe_batch += 1
             self._probe_q.put(doc)
-            first_new = first_new or doc
-        if first_new is not None:
+        if new:
+            for root in set(d.folder.root or d.folder for d in new):   # una pasada por raíz, no por fichero
+                self._refresh_folder(root)
             self._update_count()
             self._pause_background()   # sondeo pendiente: que el segundo plano no lo frene
             self._refresh_status()     # la barra dice «Analizando k de n archivos…» mientras dura el sondeo
-        if first_new is not None and self.current is None:
-            self.listbox.select_row(first_new.row)
+            if DEBUG:
+                self._log_panel()
+            self._geometry_soon()
+        if self.current is None:
+            first = next((d for d in new if not d.hidden), None)
+            if first is not None:
+                self.listbox.select_row(first.row)
         if dirs:
             self._scan_dirs(dirs)
 
+    def _attach_doc(self, doc):
+        """Mete `doc` en su carpeta del panel (raíz o subcarpeta; se crean si hacen falta) y en `self.docs`, en el
+        orden del panel: dentro de cada carpeta, por orden de llegada (los de un recorrido vienen en orden natural;
+        los que trae la vigilancia van al final, como una cola). Por bisección: ni se reordena la lista ni se
+        recorre el panel."""
+        folder = self._folder_for(doc.path.parent)
+        doc.folder = folder
+        folder.docs.append(doc)
+        folder.seq += 1
+        key = folder.doc_key(folder.seq)
+        i = bisect.bisect(self._keys, key)
+        self._keys.insert(i, key)
+        self.docs.insert(i, doc)
+        self._by_path[doc.path] = doc
+        doc.row = self._make_row(doc)
+        doc.row.key = key
+        self.listbox.add(doc.row)   # la lista lo coloca por su clave
+        doc.row.show_all()
+
+    def _root_covering(self, d):
+        """La raíz del panel más honda que contiene la carpeta `d` (o es ella), o None."""
+        best = None
+        for r in self.roots:
+            if (r.path == d or r.path in d.parents) and (best is None or len(r.path.parts) > len(best.path.parts)):
+                best = r
+        return best
+
+    def _add_root(self, d, dirs=None):
+        """Fila de carpeta raíz para `d` (aunque no tenga vídeos: desde ella se vigila), si ninguna raíz la cubre ya.
+        El ojo y la vigilancia se restauran de la configuración; `dirs` (las carpetas del recorrido que acaba de
+        hacerse) ahorra volver a recorrerla para poner los vigilantes."""
+        root = self._root_covering(d)
+        if root is not None:
+            return root
+        root = Folder(d, None, len(self.roots))
+        self.roots.append(root)
+        saved = (self.settings.get("folders") or {}).get(str(d)) or {}
+        root.hide_done = bool(saved.get("hide_done"))
+        root.row = self._make_folder_row(root)
+        self.listbox.add(root.row)
+        root.row.show_all()
+        self._refresh_folder(root)
+        if saved.get("watch"):
+            self._set_watch(root, True, dirs)
+            if root.watch:
+                root.watch_btn.set_active(True)   # _on_watch no hace nada: ya está activa
+        return root
+
+    def _folder_for(self, d):
+        """Carpeta del panel en la que van los vídeos de la carpeta `d`: una raíz (la que la cubre, o una nueva) o una
+        subcarpeta de esa raíz (con fila nueva si no la tenía)."""
+        root = self._add_root(d)
+        if root.path == d:
+            return root
+        for s in root.subs:
+            if s.path == d:
+                return s
+        sub = Folder(d, root)
+        i = bisect.bisect([s.rel for s in root.subs], sub.rel)
+        root.subs.insert(i, sub)
+        sub.row = self._make_folder_row(sub)
+        self.listbox.add(sub.row)
+        sub.row.show_all()
+        return sub
+
     def _scan_dirs(self, dirs):
-        """Busca los vídeos soportados de las carpetas en un hilo (una carpeta remota puede tardar) y los añade."""
+        """Busca los vídeos soportados de las carpetas en un hilo (una carpeta remota puede tardar) y los añade, cada
+        carpeta con su fila de raíz (aunque esté vacía)."""
         self._scanning += 1
         self._update_count()
         self._refresh_status()
         log("carpetas: buscando vídeos en %s" % ", ".join(str(d) for d in dirs))
 
-        def done(found, dt):
+        def done(found, seen, dt):
             self._scanning -= 1
 
             def rel(f):
@@ -3775,36 +3960,43 @@ class ThumbSheet(Gtk.Window):
                 return str(f)
             names = ", ".join(rel(f) for f in found)
             log("carpetas: %d vídeos en %.1f s: %s" % (len(found), dt, names if len(names) <= 300 else names[:300] + "…"))
+            for d in dirs:
+                self._add_root(d, [x for x in seen if x == d or d in x.parents])
             if found:
                 self.add_paths(found)
             else:
                 self.toast.show_error("Sin vídeos soportados en %s" % ", ".join(d.name or str(d) for d in dirs))
             self._update_count()
             self._refresh_status()
+            if DEBUG:
+                self._log_panel()
             return False
 
         def work():
             t0 = time.time()
-            found = find_videos(dirs)
-            GLib.idle_add(done, found, time.time() - t0)
+            found, seen = walk_videos(dirs)
+            GLib.idle_add(done, found, seen, time.time() - t0)
         threading.Thread(target=work, name="ts-scan", daemon=True).start()
 
     def _update_count(self):
         n = len(self.docs)
+        hidden = sum(1 for d in self.docs if d.hidden)
         text = "Sin archivos" if n == 0 else "1 archivo" if n == 1 else "%d archivos" % n
+        if hidden:
+            text += " · %d oculto%s" % (hidden, "" if hidden == 1 else "s")
         if self._scanning:
             text += " · buscando…"
         self.count_label.set_text(text)
         if DEBUG:
-            log("archivos: %d" % n)
+            log("archivos: %d%s" % (n, (" ocultos: %d" % hidden) if hidden else ""))
 
     def _make_row(self, doc):
         row = Gtk.ListBoxRow()
         row.doc = doc
-        # tres líneas (nombre, directorio, duración·resolución + icono) en la misma altura que antes tenían
-        # dos: márgenes mínimos y letra pequeña en las secundarias
+        # dos líneas (nombre; duración·resolución·tamaño + icono de estado), sangradas bajo su carpeta: márgenes
+        # mínimos y letra pequeña en la segunda
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        box.set_margin_start(8)
+        box.set_margin_start(6 + PANEL_INDENT * (1 if doc.folder.root is None else 2))
         box.set_margin_end(8)
         box.set_margin_top(1)
         box.set_margin_bottom(1)
@@ -3812,24 +4004,14 @@ class ThumbSheet(Gtk.Window):
         name.set_xalign(0.0)
         name.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
         name.set_tooltip_text(str(doc.path))
-        where = Gtk.Label()
-        where.set_xalign(0.0)
-        where.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-        where.get_style_context().add_class("dim-label")
-        where.set_markup(sub_markup(short_dir(doc.path)))
-        where.set_tooltip_text(str(doc.path.parent))
         sub = Gtk.Label()
         sub.set_xalign(0.0)
         sub.get_style_context().add_class("dim-label")
         sub.set_ellipsize(Pango.EllipsizeMode.END)   # que una línea larga nunca fuerce el ancho del panel
         sub.set_markup(sub_markup(doc.subtitle))
         state = StateIcon()
-        # el icono de estado ocupa el alto de las líneas 2.ª y 3.ª, a su derecha
-        lines = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        lines.pack_start(where, False, False, 0)
-        lines.pack_start(sub, False, False, 0)
         lower = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        lower.pack_start(lines, True, True, 0)
+        lower.pack_start(sub, True, True, 0)
         lower.pack_end(state, False, False, 0)
         box.pack_start(name, False, False, 0)
         box.pack_start(lower, False, False, 0)
@@ -3837,6 +4019,273 @@ class ThumbSheet(Gtk.Window):
         row.sub_label = sub
         row.state = state
         return row
+
+    def _make_folder_row(self, folder):
+        """Fila de carpeta: no se selecciona ni coge el foco. Raíz: ruta (~ por el home) en negrita, recuento y los dos
+        botones; subcarpeta: su ruta relativa, atenuada y sangrada."""
+        row = Gtk.ListBoxRow()
+        row.doc = None
+        row.folder = folder
+        row.key = folder.sort_key()
+        row.set_selectable(False)
+        row.set_activatable(False)
+        row.set_can_focus(False)
+        row.get_style_context().add_class("ts-folder")
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
+        box.set_margin_start(6 + (0 if folder.root is None else PANEL_INDENT))
+        box.set_margin_end(2)
+        box.pack_start(Gtk.Image.new_from_icon_name("folder-symbolic", Gtk.IconSize.MENU), False, False, 0)
+        name = Gtk.Label()
+        name.set_xalign(0.0)
+        name.set_ellipsize(Pango.EllipsizeMode.START)   # si no cabe, que se vea el final: el nombre de la carpeta
+        name.set_tooltip_text(str(folder.path))
+        box.pack_start(name, True, True, 0)
+        if folder.root is not None:
+            name.set_text(folder.rel[1])
+            name.get_style_context().add_class("dim-label")
+            row.add(box)
+            return row
+        name.set_markup("<b>%s</b>" % GLib.markup_escape_text(short_path(folder.path)))
+        count = Gtk.Label()
+        count.get_style_context().add_class("dim-label")
+        box.pack_start(count, False, False, 2)
+        eye = Gtk.ToggleButton()
+        eye.add(icon_or_text(EYE_OPEN, "ojo"))
+        watch = Gtk.ToggleButton()
+        watch.add(icon_or_text("view-refresh-symbolic", "vigilar"))
+        for b in (eye, watch):
+            b.set_relief(Gtk.ReliefStyle.NONE)
+            b.set_can_focus(False)              # las flechas siguen moviéndose por los vídeos
+            b.set_focus_on_click(False)
+        box.pack_end(watch, False, False, 0)
+        box.pack_end(eye, False, False, 0)
+        folder.eye_btn, folder.watch_btn, folder.count_label = eye, watch, count
+        eye.set_active(folder.hide_done)
+        eye.connect("toggled", self._on_eye, folder)
+        watch.connect("toggled", self._on_watch, folder)
+        self._folder_tips(folder)
+        row.add(box)
+        return row
+
+    def _folder_tips(self, root):
+        """Recuento y tooltips de la fila de una raíz según su estado, y el icono del ojo (abierto o tachado)."""
+        n = sum(1 for _ in root.all_docs())
+        hidden = sum(1 for d in root.all_docs() if d.hidden)
+        root.count_label.set_markup(sub_markup(("%d vídeo%s" % (n, "" if n == 1 else "s")) +
+                                               ((" · %d oculto%s" % (hidden, "" if hidden == 1 else "s")) if hidden else "")))
+        img = root.eye_btn.get_child()
+        if isinstance(img, Gtk.Image) and Gtk.IconTheme.get_default().has_icon(EYE_CLOSED):
+            img.set_from_icon_name(EYE_CLOSED if root.hide_done else EYE_OPEN, Gtk.IconSize.MENU)
+        root.eye_btn.set_tooltip_text(
+            ("Mostrar también los vídeos ya cortados (%d ocultos)" % hidden) if root.hide_done else
+            "Ocultar los vídeos ya cortados (<nombre>-cortado) de esta carpeta y sus subcarpetas; las subcarpetas en "
+            "las que no quede ninguno a la vista desaparecen hasta que llegue otro vídeo")
+        root.watch_btn.set_tooltip_text(
+            ("Vigilando esta carpeta y sus subcarpetas (%d): los vídeos que aparezcan se cargan solos y se generan en "
+             "segundo plano. Clic para dejar de vigilar" % len(root.monitors)) if root.watch else
+            "Vigilar esta carpeta y sus subcarpetas: los vídeos que aparezcan (también en subcarpetas nuevas) se cargan "
+            "solos y se generan en segundo plano")
+
+    def _refresh_folder(self, root):
+        """Qué se ve de una raíz: con el ojo activo, los -cortado se ocultan (y si uno se estaba generando en segundo
+        plano, se para); una subcarpeta sólo se muestra mientras le quede algún vídeo a la vista. Si el vídeo a la
+        vista queda oculto se pasa al siguiente. Actualiza el recuento de la fila."""
+        shown = False
+        for d in root.all_docs():
+            h = bool(root.hide_done and is_cut_name(d.path))
+            if h == d.hidden:
+                continue
+            d.hidden = h
+            if d.row is not None:
+                d.row.set_visible(not h)
+            shown = shown or not h
+        for s in root.subs:
+            if s.row is not None:
+                s.row.set_visible(any(not d.hidden for d in s.docs))
+        self._folder_tips(root)
+        cur = self.current
+        if cur is not None and cur.hidden:
+            self._show_neighbor(cur)
+        gen = self.gen_doc
+        if gen is not None and gen.hidden and gen is not self.current and self.generator is not None \
+                and not self.generator.finished:
+            self._cancel_generator()   # se estaba generando en segundo plano un vídeo que acaba de ocultarse
+            GLib.idle_add(self._start_next_background)
+        if shown:
+            self._refresh_row_states()   # los que vuelven a verse: su icono de caché
+            if self.current is None:
+                first = pick_next(self.docs, 0, self._usable)
+                if first is not None:
+                    self.listbox.select_row(first.row)
+
+    def _on_eye(self, btn, root):
+        root.hide_done = btn.get_active()
+        self._save_folder_prefs(root)
+        self._refresh_folder(root)
+        self._update_count()
+        log("ojo: %s: %s (%d ocultos)" % (root.name, "ocultar cortados" if root.hide_done else "mostrar todo",
+                                          sum(1 for d in root.all_docs() if d.hidden)))
+        if DEBUG:
+            self._log_panel()
+        self._geometry_soon()
+
+    def _save_folder_prefs(self, root):
+        """Ojo y vigilancia de cada raíz se recuerdan por ruta (settings «folders»); sin nada activo, se olvida."""
+        prefs = self.settings.get("folders")
+        if not isinstance(prefs, dict):
+            prefs = self.settings["folders"] = {}
+        key = str(root.path)
+        if root.hide_done or root.watch:
+            prefs[key] = {"hide_done": root.hide_done, "watch": root.watch}
+        else:
+            prefs.pop(key, None)
+
+    @staticmethod
+    def _row_compare(a, b):
+        ka, kb = a.key, b.key
+        return -1 if ka < kb else (1 if ka > kb else 0)
+
+    @staticmethod
+    def _usable(d):
+        """Vídeo al que se puede pasar: con fila, a la vista y sin borrarse."""
+        return d.row is not None and not d.hidden and not d.deleting
+
+    def _on_move_cursor(self, box, step, count):
+        """Flechas e Inicio/Fin en el panel: de vídeo a la vista en vídeo a la vista, saltando de un solo paso las filas
+        de carpeta (GTK pararía el cursor en ellas aunque no se puedan seleccionar) y los ocultos."""
+        cur = self.current
+        if step == Gtk.MovementStep.DISPLAY_LINES and cur in self.docs:
+            i = self.docs.index(cur)
+            seq = self.docs[i + 1:] if count > 0 else self.docs[:i][::-1]
+        elif step == Gtk.MovementStep.BUFFER_ENDS:
+            seq = self.docs if count < 0 else self.docs[::-1]
+        else:
+            return
+        target = next((d for d in seq if self._usable(d)), None)
+        if target is not None and target is not cur:
+            box.select_row(target.row)
+            target.row.grab_focus()
+        box.stop_emission_by_name("move-cursor")
+
+    # ---- vigilancia de carpetas ------------------------------------------------------------------
+    def _on_watch(self, btn, root):
+        if btn.get_active() != root.watch:
+            self._set_watch(root, btn.get_active())
+
+    def _set_watch(self, root, on, dirs=None):
+        """Vigilancia del árbol de una raíz: un vigilante (inotify, vía Gio) por carpeta, también en las vacías y en
+        las que se creen después; no cuesta nada mientras no pasa nada. `dirs` son las carpetas del árbol si acaban
+        de recorrerse; si no, se recorre en un hilo. Al activarla no se cargan los vídeos que ya hubiera sin cargar:
+        sólo los que aparezcan desde ahora."""
+        root.watch = on
+        root.watch_gen += 1
+        self._save_folder_prefs(root)
+        if not on:
+            n = len(root.monitors)
+            for m in root.monitors.values():
+                m.cancel()
+            root.monitors = {}
+            log("vigilar: %s: desactivada (%d carpetas)" % (root.name, n))
+            self._folder_tips(root)
+            return
+        if dirs is not None:
+            self._watch_attach(root, dirs, root.watch_gen)
+            return
+        gen = root.watch_gen
+
+        def work():
+            seen = walk_videos([root.path])[1]
+            GLib.idle_add(self._watch_attach, root, seen, gen)
+        threading.Thread(target=work, name="ts-watch", daemon=True).start()
+
+    def _watch_attach(self, root, dirs, gen, grown=None):
+        """Pone vigilante a las carpetas de `dirs` que no lo tengan (`grown`: subcarpeta nueva, sólo para el log)."""
+        if gen != root.watch_gen or not root.watch:
+            return False
+        err = None
+        for d in dirs:
+            if d in root.monitors:
+                continue
+            try:
+                m = Gio.File.new_for_path(str(d)).monitor_directory(Gio.FileMonitorFlags.NONE, None)
+            except GLib.Error as e:
+                err = e.message
+                continue
+            m.connect("changed", self._on_dir_event, root)
+            root.monitors[d] = m
+        if not root.monitors and err:
+            log("vigilar: %s: no se pudo vigilar: %s" % (root.name, err))
+            self._error("No se pudo vigilar la carpeta %s" % root.name, err)
+            root.watch_btn.set_active(False)   # → _on_watch → _set_watch(False)
+            return False
+        if err:
+            log("vigilar: %s: alguna carpeta no se pudo vigilar: %s" % (root.name, err))
+        log("vigilar: %s: %s (%d carpetas)" % (root.name, ("carpeta nueva %s" % grown) if grown else "activada",
+                                              len(root.monitors)))
+        self._folder_tips(root)
+        return False
+
+    def _watch_drop(self, root, d):
+        """Carpeta vigilada borrada (o movida fuera): fuera su vigilante y los de sus subcarpetas."""
+        for x in [x for x in root.monitors if x == d or d in x.parents]:
+            root.monitors.pop(x).cancel()
+        if DEBUG:
+            log("vigilar: %s: fuera %s (%d carpetas)" % (root.name, d.name, len(root.monitors)))
+        self._folder_tips(root)
+
+    def _watch_grow(self, root, d):
+        """Subcarpeta nueva en un árbol vigilado: se recorre en un hilo, para vigilarla (y a sus subcarpetas) y cargar
+        los vídeos con los que haya llegado (una carpeta movida aquí viene con ellos dentro)."""
+        gen = root.watch_gen
+        try:
+            rel = d.relative_to(root.path)
+        except ValueError:
+            rel = d
+
+        def grown(found, seen):
+            if gen == root.watch_gen and root.watch:
+                self._watch_attach(root, seen, gen, grown=rel)
+                self._watch_found(root, found)
+            return False
+
+        def work():
+            found, seen = walk_videos([d])
+            GLib.idle_add(grown, found, seen)
+        threading.Thread(target=work, name="ts-watch", daemon=True).start()
+
+    def _watch_found(self, root, paths):
+        """Vídeos aparecidos en un árbol vigilado: los que no estén cargados (ni sean de esta app) entran por el camino
+        de siempre: sondeo y, después, generación en segundo plano."""
+        new = [p for p in paths if p not in self._by_path and p not in self._own_outputs]
+        if not new:
+            return
+        for p in new:
+            try:
+                rel = p.relative_to(root.path)
+            except ValueError:
+                rel = p
+            log("vigilar: nuevo vídeo %s" % rel)
+        self.add_paths(new)
+
+    def _on_dir_event(self, monitor, f, other, ev, root):
+        """Aviso de una carpeta vigilada. Vídeo nuevo cuando termina de escribirse (CHANGES_DONE_HINT: al cerrarlo, o
+        a los 2 s de aparecer si llegó movido); carpeta nueva → vigilarla y recorrerla; carpeta borrada → fuera sus
+        vigilantes. Lo que escribe esta app (-cortado) no se carga."""
+        path = f.get_path()
+        if not path or not root.watch:
+            return
+        p = pathlib.Path(path)
+        if ev == Gio.FileMonitorEvent.DELETED:
+            if p in root.monitors:
+                self._watch_drop(root, p)
+            return
+        if p.name.startswith("."):
+            return
+        if ev == Gio.FileMonitorEvent.CREATED:
+            if p.is_dir() and not p.is_symlink() and p not in root.monitors:
+                self._watch_grow(root, p)
+        elif ev == Gio.FileMonitorEvent.CHANGES_DONE_HINT and is_video_name(p.name) and p.is_file():
+            self._watch_found(root, [p])
 
     def _probe_loop(self):
         while True:
@@ -4008,8 +4457,8 @@ class ThumbSheet(Gtk.Window):
         i0 = self.docs.index(start) + 1 if start in self.docs else 0
         for k in range(len(self.docs)):
             doc = self.docs[(i0 + k) % len(self.docs)]
-            if doc is self.current or doc.info is None or doc.bg_tried == S or doc.deleting or doc.gen_error:
-                continue   # gen_error: no da fotogramas; no se insiste hasta que se abra ese vídeo
+            if doc is self.current or doc.info is None or doc.bg_tried == S or doc.deleting or doc.gen_error or doc.hidden:
+                continue   # gen_error: no da fotogramas; no se insiste hasta que se abra ese vídeo. hidden: ya cortado
             doc.bg_tried = S
             if doc_complete(doc, S):
                 continue
@@ -4102,7 +4551,8 @@ class ThumbSheet(Gtk.Window):
                 ("No se pudieron sacar fotogramas: %s\nClic en el vídeo para reintentar." % d.gen_error)
             if d.row.state.set_error(text) and DEBUG:
                 log("estado: %s → %s" % (d.path.name, d.row.state.state_name()))
-        docs = [d for d in self.docs if d.row is not None and d.info is not None and d is not gen_doc and not d.gen_error]
+        docs = [d for d in self.docs if d.row is not None and d.info is not None and d is not gen_doc and not d.gen_error
+                and not d.hidden]   # ocultos: sin icono a la vista, sin listdir
         if not docs:
             return
         if self._coverage_busy:
@@ -4571,6 +5021,7 @@ class ThumbSheet(Gtk.Window):
         if not doc or not doc.info or not segs:
             return
         out = cut_output_path(doc.path)
+        self._own_outputs.add(out)   # si la carpeta está vigilada, el resultado no se carga como vídeo nuevo
         total = sum(b - a for a, b in segs)
         dlg = Gtk.Dialog(title="Cortar y unir", transient_for=self, modal=True)
         cancel_btn = dlg.add_button("_Cancelar", Gtk.ResponseType.CANCEL)
@@ -4908,6 +5359,7 @@ class ThumbSheet(Gtk.Window):
         if doc.deleting:
             return
         doc.deleting = True          # misma marca que Eliminar: fila insensible y fuera del segundo plano mientras tanto
+        self._own_outputs.add(target)   # si la carpeta está vigilada, el renombrado no se carga como vídeo nuevo
         log("full: %s → %s" % (doc.path.name, target.name))
         if doc is self.current:
             self.hide_preview()
@@ -4956,14 +5408,13 @@ class ThumbSheet(Gtk.Window):
         return False
 
     def _show_neighbor(self, doc):
-        """Pasa a mostrar el vecino de `doc` (el siguiente, o el último si era el último) sin quitar su fila."""
-        others = [d for d in self.docs if d is not doc and not d.deleting]
-        if not others:
+        """Pasa a mostrar el vecino de `doc` (el siguiente vídeo a la vista; si no hay, el anterior) sin quitar su fila."""
+        idx = self.docs.index(doc) if doc in self.docs else len(self.docs)
+        nxt = pick_next(self.docs, idx + 1, lambda d: d is not doc and self._usable(d))
+        if nxt is None:
             self.show_document(None)
-            return
-        idx = self.docs.index(doc)
-        after = [d for d in others if self.docs.index(d) > idx]
-        self.listbox.select_row((after[0] if after else others[-1]).row)
+        else:
+            self.listbox.select_row(nxt.row)
 
     def _delete_done(self, doc, err, ok_text, err_text, ok_log):
         doc.deleting = False
@@ -4980,23 +5431,34 @@ class ThumbSheet(Gtk.Window):
         return False
 
     def _remove_doc(self, doc, show_next=True):
-        """Quita `doc` del panel. Si era el que estaba a la vista, abre el siguiente de la lista (o el último si
-        era el último); con `show_next=False` deja el mosaico vacío."""
+        """Quita `doc` del panel y de su carpeta (si era el último a la vista de una subcarpeta, la fila de ésta se
+        esconde). Si era el que estaba a la vista, abre el siguiente vídeo a la vista, saltando filas de carpeta y
+        ocultos (si no hay ninguno después, el anterior); con `show_next=False` deja el mosaico vacío."""
         if doc not in self.docs:
             return
         idx = self.docs.index(doc)
-        self.docs.remove(doc)
+        del self.docs[idx]
+        del self._keys[idx]
+        self._by_path.pop(doc.path, None)
+        folder = doc.folder
         row, doc.row = doc.row, None
         was_current = self.current is doc
         if was_current:
             self.current = None
         if row is not None:
             self.listbox.remove(row)
+        if folder is not None:
+            folder.docs.remove(doc)
+            self._refresh_folder(folder.root or folder)
         self._update_count()
+        if DEBUG:
+            self._log_panel()
+        self._geometry_soon()
         if not was_current:
             return
-        if show_next and self.docs:
-            self.listbox.select_row(self.docs[min(idx, len(self.docs) - 1)].row)
+        nxt = pick_next(self.docs, idx, self._usable) if show_next else None
+        if nxt is not None:
+            self.listbox.select_row(nxt.row)
         else:
             self._load_current()
 
@@ -5234,6 +5696,7 @@ def main(argv):
         .ts-sheet-scroll scrollbar.vertical slider { min-width: 16px; min-height: 56px; border-radius: 10px; }
         .ts-sheet-scroll scrollbar.vertical { background-color: #1c1c1f; border: none; }   /* sin la raya clara de Adwaita */
         .ts-files row { padding: 1px 0; }
+        .ts-files row.ts-folder { background-color: alpha(@theme_fg_color, 0.06); }
         .ts-card:hover { background-color: alpha(@theme_fg_color, 0.07); }
         .ts-card.ts-dragging { opacity: 0.3; }   /* hueco de la tarjeta arrastrada */
         .ts-panel-header { padding: 1px 2px 1px 8px; background-color: alpha(@theme_fg_color, 0.06);

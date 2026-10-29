@@ -34,6 +34,17 @@
 - `gui_folders.sh <vídeo A corto> [out]` — Xvfb propio (`:72`). Arranca la app con una CARPETA como único argumento
   (copias de A con distintos nombres y extensiones en subcarpetas, más ficheros que no son vídeo y uno oculto) y
   comprueba que entran sólo los soportados, en orden natural, y que se generan.
+- `test_tree.py` — sin ventana, instantáneo: el panel anidado por carpetas. `is_cut_name` (qué cuenta como ya
+  cortado), `pick_next` (a qué vídeo se pasa al borrar, procesar u ocultar: el siguiente a la vista o, si no, el
+  anterior; carpetas y ocultos se saltan), `walk_videos` (vídeos y todas las carpetas recorridas, también las vacías)
+  y las claves de orden de `Folder` (raíz, sus vídeos por orden de llegada, luego cada subcarpeta con los suyos).
+- `gui_tree.sh <vídeo A corto> [out]` — Xvfb propio (`:68`). Árbol con copias de A (dos vídeos y un `-cortado` en la
+  raíz, uno en `sub/`, un `-cortado` solo en `sub/done/` y una carpeta vacía): el panel anidado (la vacía no sale); el
+  ojo oculta los `-cortado`, esconde `sub/done` y lo dice la cabecera; flechas e Inicio/Fin saltan filas de carpeta y
+  ocultos; al borrar se pasa al siguiente a la vista; la vigilancia carga un vídeo nuevo en la carpeta vacía, otro en
+  la subcarpeta escondida (que reaparece) y una subcarpeta nueva movida con un vídeo dentro, y los tres se generan en
+  segundo plano; el `-cortado` que escribe la app no se carga; al desactivarla no entra nada; ojo y vigilancia se
+  guardan por carpeta y se restauran al reabrir.
 - `test_loader.py` — sin ventana, instantáneo: el cargador de miniaturas atiende lo visible antes que la precarga
   (y lo visible de arriba abajo), descarta lo que ya no está a la vista ni en el margen, y una petición visible
   saca la tesela de la cola de precarga.

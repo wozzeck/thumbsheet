@@ -12,14 +12,29 @@ thumbsheet vídeo.mp4 [otro.mkv ...]   # o "Abrir con" desde el gestor de archiv
 thumbsheet                            # sin argumentos: diálogo para elegir vídeos
 ```
 
-- **Varios vídeos**: se listan en el panel izquierdo, con una cabecera que dice cuántos hay y un botón
-  `+` para añadir más (también `Ctrl+O` o arrastrándolos a la ventana). **Carpetas**: el botón de carpeta
-  (`Ctrl+Mayús+O`), arrastrar una carpeta a la ventana o pasarla como argumento añade todos los vídeos
-  soportados que haya en ella y en sus subcarpetas (por extensión, sin ocultos), en orden natural por ruta;
-  el recorrido va en un hilo aparte (una carpeta remota puede tardar) y la cabecera dice «buscando…»
-  mientras tanto. Cada fila muestra el nombre, el
-  directorio (con `~` por el home) y duración, resolución y tamaño; los recortes de cada vídeo se guardan junto
-  a su original, estén donde estén. A la derecha de la segunda y tercera líneas, un mosaico de
+- **Varios vídeos**: se listan en el panel izquierdo, **anidados por carpetas**, con una cabecera que dice cuántos
+  hay (y cuántos ocultos) y un botón `+` para añadir más (también `Ctrl+O` o arrastrándolos a la ventana).
+  **Carpetas**: el botón de carpeta (`Ctrl+Mayús+O`), arrastrar una carpeta a la ventana o pasarla como argumento
+  añade todos los vídeos soportados que haya en ella y en sus subcarpetas (por extensión, sin ocultos), en orden
+  natural por ruta; el recorrido va en un hilo aparte (una carpeta remota puede tardar) y la cabecera dice
+  «buscando…» mientras tanto. Cada carpeta añadida (o la de un vídeo añadido suelto) es una fila raíz, con su ruta
+  (`~` por el home), el recuento y dos botones; debajo van sus vídeos y luego una fila por subcarpeta con vídeos
+  (ruta relativa, en orden natural); las subcarpetas vacías o sin vídeos no salen. Dentro de cada carpeta los
+  vídeos van por orden de llegada (los de un recorrido, en orden natural; los que trae la vigilancia, al final).
+  Los dos botones valen para todo el árbol de la raíz y se recuerdan por carpeta entre sesiones:
+  - el **ojo** oculta los vídeos ya procesados (`<nombre>-cortado`, `-cortado-2`…); una subcarpeta que se queda
+    sin nada a la vista desaparece también, hasta que llegue otro vídeo. Los ocultos quedan fuera del segundo
+    plano y del recuento de caché;
+  - la **vigilancia** pone un vigilante (inotify, vía Gio) en la carpeta y en todas sus subcarpetas, también las
+    vacías y las que se creen después: los vídeos que aparezcan se cargan solos cuando terminan de escribirse y
+    entran en la cola de generación en segundo plano como los demás. Lo que escribe la propia app (`-cortado`)
+    no se carga. No cuesta nada mientras no pasa nada; en una carpeta remota (gvfs, sshfs) sólo se ven los
+    cambios hechos desde este equipo.
+
+  Al borrar, cortar y borrar, o dar por bueno un vídeo se pasa al siguiente a la vista, saltando las filas de
+  carpeta y los ocultos (si no hay ninguno después, al anterior); las flechas arriba/abajo e Inicio/Fin en el
+  panel hacen lo mismo. Cada fila de vídeo muestra el nombre y duración, resolución y tamaño; los recortes de cada
+  vídeo se guardan junto a su original, estén donde estén. A la derecha de la segunda línea, un mosaico de
   4×4 cuadritos indica qué parte de sus miniaturas para el intervalo actual está ya en caché, por
   dieciseisavos: los cuadritos negros se van llenando de arriba abajo; los que faltan se ven en gris claro
   mientras se generan, y si no hay nada en caché ni se está generando no aparece nada. Un aspa roja en su lugar significa que el vídeo no se puede
@@ -134,7 +149,8 @@ rueda o el teclado, al momento. Atajos: la rueda sobre cada slider mueve un paso
 las teselas por fila (rueda arriba, más grandes); `Ctrl+Mayús+rueda` sobre el mosaico cambia el intervalo (rueda
 arriba acerca: intervalo más corto, más teselas; abajo aleja), conservando la zona del vídeo a la vista como el
 slider; `C` abre Cortar (Intro en el diálogo = cortar y borrar original); `Supr` abre Eliminar (Intro confirma);
-`Ctrl+A` selecciona todo; `Esc` deselecciona; `Ctrl+Q` cierra.
+flechas arriba/abajo, Inicio y Fin en el panel pasan al vídeo anterior/siguiente a la vista (saltan las filas de
+carpeta y los ocultos); `Ctrl+A` selecciona todo; `Esc` deselecciona; `Ctrl+Q` cierra.
 
 **Snap scroll** (toggle de la barra; se recuerda entre sesiones): el mosaico se desplaza por filas enteras. La
 primera fila a la vista queda siempre completa y en el mismo sitio que la primera del vídeo con el scroll arriba
@@ -243,6 +259,7 @@ Ajustes (intervalo, tamaño, ventana) se guardan en `~/.config/thumbsheet/settin
 - `thumbsheet.py` — todo: sondeo (`VideoInfo`), planificador y workers (`Generator`), GPU (`Gpu`),
   caché/cargador (`PixCache`, `Loader`), mosaico y selección (`Sheet`), vista ampliada y reproductor
   (`Preview`, `PreviewLayer`, `Player`), corte (`expand_to_keyframes`, `cut_command`), segmentos y proyecto LLC
-  (`selection_segments`, `write_llc_project`), vídeo abierto (`Document`), ventana (`ThumbSheet`).
+  (`selection_segments`, `write_llc_project`), vídeo abierto (`Document`), carpetas del panel y su vigilancia
+  (`Folder`, `Gio.FileMonitor`), ventana (`ThumbSheet`).
 - `thumbsheet` — lanzador; `thumbsheet.desktop` + `icon.svg` — entrada de menú; `install.sh`.
 - `tests/` — comprobaciones sin pantalla del generador (ver `tests/README.md`).

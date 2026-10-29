@@ -76,9 +76,14 @@ sleep 0.5
 P=$(last "panel:")
 [[ "$P" == "panel: arbol: a1.mp4, ~a2-cortado.mp4 | sub: b1.mkv | ~sub/done: ~c-cortado.mp4" ]] && ok "panel tras borrar" || ko "panel tras borrar: '$P'"
 
-# 5. vigilancia: vídeo nuevo en la carpeta vacía, en la subcarpeta escondida (reaparece) y una subcarpeta nueva movida
+# 5. vigilancia: al activarla entra lo que ya existía sin cargar; después, vídeo nuevo en la carpeta vacía, en la
+#    subcarpeta escondida (reaparece) y una subcarpeta nueva movida con un vídeo dentro
+cp "$VIDEO_A" "$OUT/arbol/sub/pre.mp4"   # existe antes de activar y no está cargado
 xdotool mousemove $((X+WX)) $((Y+WY)) click 1; sleep 0.8; away
 grep -q "vigilar: arbol: activada (4 carpetas)" "$L" && ok "vigilancia activada: 4 carpetas (raíz, sub, sub/done, vacia)" || ko "vigilar: $(last 'vigilar:')"
+waitfor "vigilar: ya estaba sub/pre.mp4" 40 && ok "al activar: pre.mp4 (existía sin cargar) entra" || ko "pre.mp4 no entró al activar: $(grep 'vigilar' "$L" | tail -2 | tr '\n' ' ')"
+sleep 0.5; P=$(last "panel:")
+[[ "$P" == *"| sub: b1.mkv, pre.mp4 |"* ]] && ok "panel: pre.mp4 detrás de b1 en sub" || ko "panel con pre: '$P'"
 cp "$VIDEO_A" "$OUT/arbol/vacia/n1.mp4"
 waitfor "vigilar: nuevo vídeo vacia/n1.mp4" 40 && ok "vigilancia: n1.mp4 aparece en vacia/ y se carga" || ko "n1 no se cargó: $(grep 'vigilar' "$L" | tail -2 | tr '\n' ' ')"
 sleep 0.5; P=$(last "panel:")
@@ -91,8 +96,8 @@ sleep 0.5; P=$(last "panel:")
 mkdir "$OUT/nueva"; cp "$VIDEO_A" "$OUT/nueva/m.mp4"; mv "$OUT/nueva" "$OUT/arbol/nueva"
 waitfor "vigilar: arbol: carpeta nueva nueva (5 carpetas)" 40 && ok "subcarpeta nueva movida: se vigila (5 carpetas)" || ko "carpeta nueva: $(grep 'vigilar' "$L" | tail -2 | tr '\n' ' ')"
 waitfor "vigilar: nuevo vídeo nueva/m.mp4" 40 && ok "y su vídeo m.mp4 se carga" || ko "m no se cargó"
-for i in $(seq 1 120); do [[ "$(grep -c "fin: " "$L" || true)" -ge 6 ]] && break; sleep 0.5; done
-[[ "$(grep -c "fin: " "$L" || true)" -ge 6 ]] && ok "los tres nuevos se generan en segundo plano (6 generaciones en total)" || ko "generaciones: $(grep -c 'fin: ' "$L" || true) de 6"
+for i in $(seq 1 120); do [[ "$(grep -c "fin: .*\[\(pre\|n1\|z\|m\).mp4\]" "$L" || true)" -ge 4 ]] && break; sleep 0.5; done
+[[ "$(grep -c "fin: .*\[\(pre\|n1\|z\|m\).mp4\]" "$L" || true)" -ge 4 ]] && ok "los cuatro que entran por la vigilancia se generan en segundo plano" || ko "generados de los nuevos: $(grep -o 'fin: .*\[\(pre\|n1\|z\|m\).mp4\]' "$L" | tr '\n' ' ')"
 import -window root "$OUT/3-vigilancia.png"
 
 # 6. el -cortado que escribe la propia app no se carga aunque la carpeta esté vigilada
@@ -128,8 +133,8 @@ L="$OUT/app2.log"
 waitfor "carpetas: [0-9]* vídeos" 40 || ko "segunda sesión: no termina el recorrido"
 sleep 1
 P=$(last "panel:")
-[[ "$P" == "panel: arbol: ~a1-cortado.mp4, ~a2-cortado.mp4, n2.mp4 | nueva: m.mp4 | sub: b1.mkv | sub/done: ~c-cortado.mp4, z.mp4 | vacia: n1.mp4" ]] && ok "al reabrir: ojo restaurado, 3 ocultos, el resto a la vista" || ko "al reabrir: '$P'"
-grep -q "archivos: 8 ocultos: 3" "$L" && ok "cabecera al reabrir: 8 archivos · 3 ocultos" || ko "cabecera al reabrir: $(last 'archivos:')"
+[[ "$P" == "panel: arbol: ~a1-cortado.mp4, ~a2-cortado.mp4, n2.mp4 | nueva: m.mp4 | sub: b1.mkv, pre.mp4 | sub/done: ~c-cortado.mp4, z.mp4 | vacia: n1.mp4" ]] && ok "al reabrir: ojo restaurado, 3 ocultos, el resto a la vista" || ko "al reabrir: '$P'"
+grep -q "archivos: 9 ocultos: 3" "$L" && ok "cabecera al reabrir: 9 archivos · 3 ocultos" || ko "cabecera al reabrir: $(last 'archivos:')"
 [[ "$(last 'vídeo:')" == "vídeo: n2.mp4"* ]] && ok "al reabrir se abre el primero a la vista (n2), no un oculto" || ko "al reabrir: $(last 'vídeo:')"
 grep -q "Traceback" "$L" && ko "traceback en el log 2" || ok "sin tracebacks al reabrir"
 xdotool key ctrl+q; sleep 1; kill $APP 2>/dev/null || true

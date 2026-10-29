@@ -4083,8 +4083,8 @@ class ThumbSheet(Gtk.Window):
         root.watch_btn.set_tooltip_text(
             ("Vigilando esta carpeta y sus subcarpetas (%d): los vídeos que aparezcan se cargan solos y se generan en "
              "segundo plano. Clic para dejar de vigilar" % len(root.monitors)) if root.watch else
-            "Vigilar esta carpeta y sus subcarpetas: los vídeos que aparezcan (también en subcarpetas nuevas) se cargan "
-            "solos y se generan en segundo plano")
+            "Vigilar esta carpeta y sus subcarpetas: entran los vídeos que falten y, desde ahora, los que aparezcan "
+            "(también en subcarpetas nuevas); todos se generan en segundo plano")
 
     def _refresh_folder(self, root):
         """Qué se ve de una raíz: con el ojo activo, los -cortado se ocultan (y si uno se estaba generando en segundo
@@ -4175,8 +4175,8 @@ class ThumbSheet(Gtk.Window):
     def _set_watch(self, root, on, dirs=None):
         """Vigilancia del árbol de una raíz: un vigilante (inotify, vía Gio) por carpeta, también en las vacías y en
         las que se creen después; no cuesta nada mientras no pasa nada. `dirs` son las carpetas del árbol si acaban
-        de recorrerse; si no, se recorre en un hilo. Al activarla no se cargan los vídeos que ya hubiera sin cargar:
-        sólo los que aparezcan desde ahora."""
+        de recorrerse (y sus vídeos ya están entrando); si no, se recorre en un hilo y, además de los vigilantes,
+        entran los vídeos que hubiera sin cargar: vigilar una carpeta es tener en el panel todo lo que contiene."""
         root.watch = on
         root.watch_gen += 1
         self._save_folder_prefs(root)
@@ -4193,9 +4193,15 @@ class ThumbSheet(Gtk.Window):
             return
         gen = root.watch_gen
 
+        def ready(found, seen):
+            self._watch_attach(root, seen, gen)
+            if gen == root.watch_gen and root.watch:
+                self._watch_found(root, found, "ya estaba")
+            return False
+
         def work():
-            seen = walk_videos([root.path])[1]
-            GLib.idle_add(self._watch_attach, root, seen, gen)
+            found, seen = walk_videos([root.path])
+            GLib.idle_add(ready, found, seen)
         threading.Thread(target=work, name="ts-watch", daemon=True).start()
 
     def _watch_attach(self, root, dirs, gen, grown=None):
@@ -4253,9 +4259,9 @@ class ThumbSheet(Gtk.Window):
             GLib.idle_add(grown, found, seen)
         threading.Thread(target=work, name="ts-watch", daemon=True).start()
 
-    def _watch_found(self, root, paths):
-        """Vídeos aparecidos en un árbol vigilado: los que no estén cargados (ni sean de esta app) entran por el camino
-        de siempre: sondeo y, después, generación en segundo plano."""
+    def _watch_found(self, root, paths, why="nuevo vídeo"):
+        """Vídeos de un árbol vigilado (aparecidos, o que ya estaban al activarla): los que no estén cargados (ni sean
+        de esta app) entran por el camino de siempre: sondeo y, después, generación en segundo plano."""
         new = [p for p in paths if p not in self._by_path and p not in self._own_outputs]
         if not new:
             return
@@ -4264,7 +4270,7 @@ class ThumbSheet(Gtk.Window):
                 rel = p.relative_to(root.path)
             except ValueError:
                 rel = p
-            log("vigilar: nuevo vídeo %s" % rel)
+            log("vigilar: %s %s" % (why, rel))
         self.add_paths(new)
 
     def _on_dir_event(self, monitor, f, other, ev, root):

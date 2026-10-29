@@ -41,9 +41,9 @@
 - `gui_tree.sh <vídeo A corto> [out]` — Xvfb propio (`:68`). Árbol con copias de A (dos vídeos y un `-cortado` en la
   raíz, uno en `sub/`, un `-cortado` solo en `sub/done/` y una carpeta vacía): el panel anidado (la vacía no sale); el
   ojo oculta los `-cortado`, esconde `sub/done` y lo dice la cabecera; flechas e Inicio/Fin saltan filas de carpeta y
-  ocultos; al borrar se pasa al siguiente a la vista; la vigilancia carga un vídeo nuevo en la carpeta vacía, otro en
-  la subcarpeta escondida (que reaparece) y una subcarpeta nueva movida con un vídeo dentro, y los tres se generan en
-  segundo plano; el `-cortado` que escribe la app no se carga; al desactivarla no entra nada; ojo y vigilancia se
+  ocultos; al borrar se pasa al siguiente a la vista; la vigilancia carga al activarse un vídeo que ya existía sin
+  cargar, y después uno nuevo en la carpeta vacía, otro en la subcarpeta escondida (que reaparece) y una subcarpeta
+  nueva movida con un vídeo dentro, y los cuatro se generan en segundo plano; el `-cortado` que escribe la app no se carga; al desactivarla no entra nada; ojo y vigilancia se
   guardan por carpeta y se restauran al reabrir.
 - `test_loader.py` — sin ventana, instantáneo: el cargador de miniaturas atiende lo visible antes que la precarga
   (y lo visible de arriba abajo), descarta lo que ya no está a la vista ni en el margen, y una petición visible

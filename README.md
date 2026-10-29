@@ -26,9 +26,9 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
     sin nada a la vista desaparece también, hasta que llegue otro vídeo. Los ocultos quedan fuera del segundo
     plano y del recuento de caché;
   - la **vigilancia** pone un vigilante (inotify, vía Gio) en la carpeta y en todas sus subcarpetas, también las
-    vacías y las que se creen después: los vídeos que aparezcan se cargan solos cuando terminan de escribirse y
-    entran en la cola de generación en segundo plano como los demás. Lo que escribe la propia app (`-cortado`)
-    no se carga. No cuesta nada mientras no pasa nada; en una carpeta remota (gvfs, sshfs) sólo se ven los
+    vacías y las que se creen después: al activarla entran los vídeos de la carpeta que no estuvieran ya en el
+    panel, y desde entonces los que aparezcan se cargan solos cuando terminan de escribirse; todos entran en la
+    cola de generación en segundo plano como los demás. Lo que escribe la propia app (`-cortado`) no se carga. No cuesta nada mientras no pasa nada; en una carpeta remota (gvfs, sshfs) sólo se ven los
     cambios hechos desde este equipo.
 
   Al borrar, cortar y borrar, o dar por bueno un vídeo se pasa al siguiente a la vista, saltando las filas de

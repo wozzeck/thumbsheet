@@ -48,6 +48,9 @@
 - `test_focus.py` — sin pantalla, instantáneo: `focus_rows`, las filas que mandan en la prioridad de generación: la
   que asoma por arriba o por abajo sólo cuenta si se ve al menos la mitad de su alto (se empieza por la primera que
   se ve entera); si ninguna llega, todas las que tocan; rejilla regular y filas de altura propia.
+- `test_marks.py` — sin pantalla, instantáneo: lo que hay detrás de las marcas rojas de la barra de scroll y del
+  recuadro rojo de la vista ampliada: `mark_bands` (filas marcadas → bandas, consecutivas fundidas), `fit_rect`
+  (encaje centrado sin deformar) y `Selection.contains` (instante dentro de algún segmento, fin excluido).
 - `test_loader.py` — sin ventana, instantáneo: el cargador de miniaturas atiende lo visible antes que la precarga
   (y lo visible de arriba abajo), descarta lo que ya no está a la vista ni en el margen, y una petición visible
   saca la tesela de la cola de precarga.

@@ -3,7 +3,7 @@
 # borran durante la prueba; los originales no se tocan), y con
 # xdotool recorre: rueda sobre el slider de intervalo, clic/arrastre/Shift+clic/doble clic de teselas, un corte que
 # falla a propósito (toast rojo, Esc lo cierra), Cortar sin pérdida, cambio de intervalo sin alterar segmentos, vista
-# ampliada (flechas, reproducción muda, seek), cambio de vídeo, centrado al cambiar columnas, Escape,
+# ampliada (flechas y rueda, recuadro rojo, reproducción muda, seek ±intervalo y ±1 s con Ctrl), cambio de vídeo, centrado al cambiar columnas, Escape,
 # Cortar y borrar original (doble pulsación, desarme a los 5 s), Eliminar con confirmación, Ctrl+Q, y SIGKILL
 # en plena generación sin huérfanos. Capturas PNG en `out`.
 # Las expectativas se calculan a partir del intervalo (S) y las columnas (COLS) reales. El vídeo A debe
@@ -67,6 +67,7 @@ xdotool mousemove $(tile 1 0) mousedown 1; sleep 0.1; for c in 1 2 3; do xdotool
 chk "segmentos = tesela (0,1) → $S0–$((2*S0)) s, fila 1 cols 0-3 → $A–$B s (S=$S0, $COLS columnas)" "$(sel)" "$(seg $S0 $((2*S0)) $A $B)"
 xdotool mousemove $(tile 0 1) click 1; sleep 0.5
 E2=$(seg $A $B); chk "segundo clic deselecciona (queda $A–$B)" "$(sel)" "$E2"
+MB=$(grep -o "marcas: [0-9]* bandas" "$OUT/app.log" | tail -1); [[ "$MB" == "marcas: 1 bandas" ]] && ok "barra de scroll: una marca roja para el segmento $A–$B (fila 1)" || ko "marcas de la barra: '$MB'"
 
 # 3. error forzado al cortar (carpeta del vídeo de sólo lectura) → toast rojo; Esc lo cierra sin tocar la selección
 chmod a-w "$OUT/video"; xdotool mousemove $((X+CX)) $((Y+CY)) click 1; sleep 1; xdotool key alt+t
@@ -99,12 +100,35 @@ xdotool windowfocus --sync "$WID"; xdotool key Right; sleep 0.9; shot 4c2-flecha
 ls "$SEL"/*/full/$((3*S0)).jpg >/dev/null 2>&1 && ok "flecha derecha: fotograma $((3*S0)) s extraído" || ko "flecha derecha: falta full/$((3*S0)).jpg"
 xdotool key Left key Left; sleep 0.9
 ls "$SEL"/*/full/$S0.jpg >/dev/null 2>&1 && ok "dos flechas izquierda: fotograma $S0 s extraído" || ko "flecha izquierda: falta full/$S0.jpg"
+amp() { grep -o "ampliada: [0-9:]* ([a-z ]*)" "$OUT/app.log" | tail -1; }
+mmss() { printf "%d:%02d" $(($1/60)) $(($1%60)); }   # como fmt_time para menos de una hora
+chk "la tesela $S0 s (fuera de $A–$B) se abre sin recuadro" "$(amp)" "ampliada: $(mmss $S0) (sin marcar)"
+# rueda sobre el fotograma: abajo = siguiente tesela; cinco muescas llevan de $S0 a $((6*S0)) s, la primera del segmento
+for i in 1 2 3 4 5; do xdotool click 5; sleep 0.35; done; sleep 0.9
+chk "cinco muescas de rueda abajo: tesela $((6*S0)) s, dentro del segmento → recuadro rojo" "$(amp)" "ampliada: $(mmss $((6*S0))) (marcada)"
+grep -q "marca: dentro de un segmento" "$OUT/app.log" && ok "traza del recuadro al entrar en el segmento" || ko "sin traza «marca: dentro de un segmento»"
+shot 4c3-rueda-marcada 0.3
+xdotool click 4; sleep 0.9
+chk "una muesca arriba: tesela $((5*S0)) s, fuera → sin recuadro" "$(amp)" "ampliada: $(mmss $((5*S0))) (sin marcar)"
+xdotool click 5; sleep 0.9
+P0=$((6*S0))
 xdotool key space; sleep 3; shot 4e-reproduciendo 0.2; xdotool key space; sleep 0.6
 P=$(grep -o "player: pausa en [0-9.]*" "$OUT/app.log" | tail -1 | awk '{print $4}')
-python3 -c "import sys; p=float(sys.argv[1]); s=float(sys.argv[2]); sys.exit(0 if s+1.0 <= p <= s+6 else 1)" "${P:-0}" "$S0" && ok "play desde $S0 s y pausa ~3 s después (pos=$P)" || ko "posición tras reproducir inesperada: '$P'"
+python3 -c "import sys; p=float(sys.argv[1]); s=float(sys.argv[2]); sys.exit(0 if s+1.0 <= p <= s+6 else 1)" "${P:-0}" "$P0" && ok "play desde $P0 s y pausa ~3 s después (pos=$P)" || ko "posición tras reproducir inesperada: '$P'"
 xdotool key Right; sleep 0.8
 SK=$(grep -o "player: seek a [0-9.]*" "$OUT/app.log" | tail -1 | awk '{print $4}')
 python3 -c "import sys; k=float(sys.argv[1]); p=float(sys.argv[2]); s=float(sys.argv[3]); sys.exit(0 if abs(k-(p+s))<=1.0 else 1)" "${SK:-0}" "${P:-0}" "$S0" && ok "flecha derecha con vídeo: seek +$S0 s (a $SK)" || ko "seek inesperado: '$SK' (pos $P + $S0)"
+near() { python3 -c "import sys; sys.exit(0 if abs(float(sys.argv[1])-float(sys.argv[2]))<=0.05 else 1)" "$1" "$2"; }
+lastseek() { grep -o "player: seek a [0-9.]*" "$OUT/app.log" | tail -1 | awk '{print $4}'; }
+xdotool key ctrl+Right; sleep 0.8; SK2=$(lastseek)
+near "$SK2" "$(python3 -c "print(float('$SK')+1)")" && ok "Ctrl+flecha derecha con vídeo: seek +1 s (a $SK2)" || ko "Ctrl+→: seek '$SK2' (esperado $SK+1)"
+xdotool mousemove $((X+700)) $((Y+400)) click 5; sleep 0.8; SK3=$(lastseek)   # rueda abajo sobre el vídeo: +intervalo
+near "$SK3" "$(python3 -c "print(float('$SK2')+$S0)")" && ok "rueda abajo sobre el vídeo: seek +$S0 s (a $SK3)" || ko "rueda abajo: seek '$SK3' (esperado $SK2+$S0)"
+xdotool keydown ctrl click 4 keyup ctrl; sleep 0.8; SK4=$(lastseek)   # Ctrl+rueda arriba: -1 s
+near "$SK4" "$(python3 -c "print(float('$SK3')-1)")" && ok "Ctrl+rueda arriba sobre el vídeo: seek -1 s (a $SK4)" || ko "Ctrl+rueda arriba: seek '$SK4' (esperado $SK3-1)"
+NF=$(grep -c "marca: fuera" "$OUT/app.log" || true)
+xdotool key End; sleep 1.2
+[[ "$(grep -c "marca: fuera" "$OUT/app.log" || true)" -gt "$NF" ]] && ok "Fin (fuera del segmento): el recuadro se apaga" || ko "al saltar al final el recuadro no se apagó"
 shot 4f-pausado-tras-seek 0.8
 xdotool key Escape; sleep 0.5
 xdotool mousemove $(tile 0 2) click 3; sleep 0.8; xdotool mousemove $((X+700)) $((Y+450)) click 1; sleep 0.5; shot 4d-vista-cerrada 0.3

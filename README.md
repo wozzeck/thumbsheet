@@ -87,16 +87,21 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   teselas intermedias aparecen marcadas; al engrosarlo (5 → 10 s) se ven marcadas las teselas que tocan
   el segmento (15–25 s muestra 10 y 20), pero el segmento guardado no cambia y al volver a la rejilla
   fina recupera sus bordes. Marcar o desmarcar una tesela suma o resta su tramo. Se recuerda por vídeo entre sesiones (en la caché).
+  La barra de scroll lleva **marcas rojas** a la altura de las filas con teselas marcadas, para ver de un vistazo
+  dónde están los segmentos y llegar a ellos.
 - **Clic derecho** sobre una tesela: vista ampliada a toda la ventana. Sale al instante la miniatura
   ampliada y en una fracción de segundo la sustituye el fotograma a resolución nativa, que ffmpeg
-  extrae aparte y queda en la caché (`full/`). Flechas `←`/`→` pasan al fotograma anterior/siguiente
-  (los vecinos se precargan), `Inicio`/`Fin` van al primero/último. Se cierra con clic o `Esc`.
+  extrae aparte y queda en la caché (`full/`). Flechas `←`/`→` o la rueda (abajo avanza) pasan al fotograma
+  anterior/siguiente (los vecinos se precargan), `Inicio`/`Fin` van al primero/último. Si la tesela está
+  marcada, el fotograma lleva un **recuadro rojo**, como en el mosaico. Se cierra con clic o `Esc`.
 - **Reproducir desde ahí** (GStreamer, opcional): en la vista ampliada, `espacio` o el botón ▶ de la
   barra inferior reproduce el vídeo desde ese fotograma, con sonido, dentro de la misma ventana. La
   barra de progreso se puede arrastrar (hace de *scrubber*: en pausa muestra el fotograma exacto), las
-  flechas saltan ±intervalo, clic sobre el vídeo pausa/reanuda, `Esc` cierra. GStreamer elige solo el
-  decodificador por hardware si lo hay (VA-API). Sin dispositivo de sonido, reproduce en silencio.
-  `THUMBSHEET_AUDIO=0` silencia siempre.
+  flechas y la rueda saltan ±intervalo (con `Ctrl`, ±1 s; en modo fotograma, `Ctrl` abre el vídeo en pausa
+  en ese segundo, como el *scrubber*), clic sobre el vídeo pausa/reanuda, `Esc` cierra. El recuadro rojo se
+  enciende y se apaga según el instante que se ve caiga o no dentro de un segmento, tanto reproduciendo como
+  al saltar. GStreamer elige solo el decodificador por hardware si lo hay (VA-API). Sin dispositivo de sonido,
+  reproduce en silencio. `THUMBSHEET_AUDIO=0` silencia siempre.
 - **Full**: el vídeo entero vale tal cual: lo renombra a `<vídeo>-cortado.<ext>` (mismo contenedor, el
   contenido no se toca, como si se hubiera cortado de principio a fin) y lo quita de la lista, tras
   confirmar (Intro acepta, Esc cancela). Si ya existe ese nombre usa `-cortado-2`, `-cortado-3`… La caché de

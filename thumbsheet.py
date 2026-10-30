@@ -1418,6 +1418,27 @@ def snap_height(n, pitch, natural_h, page, tops=None):
     return max(natural_h, int(math.ceil(snap_top(snap_last(n, pitch, natural_h, page, tops), pitch, tops) + page)))
 
 
+def mark_bands(rows, span):
+    """Bandas [y0, y1) que ocupan las filas dadas (span(r) = (y, alto)), fundiendo las consecutivas: las marcas
+    rojas de la barra de scroll, una por tramo de filas con teselas marcadas."""
+    out, last = [], None
+    for r in sorted(set(rows)):
+        top, h = span(r)
+        if last is not None and r == last + 1:
+            out[-1] = (out[-1][0], top + h)
+        else:
+            out.append((top, top + h))
+        last = r
+    return out
+
+
+def fit_rect(pw, ph, aw, ah):
+    """Rectángulo (x, y, ancho, alto) de una imagen pw×ph encajada y centrada en un área aw×ah, sin deformar."""
+    sc = min(aw / float(pw), ah / float(ph))
+    dw, dh = pw * sc, ph * sc
+    return (aw - dw) / 2.0, (ah - dh) / 2.0, dw, dh
+
+
 def focus_rows(r0, r1, span, vy1, vy2, min_frac=0.5):
     """De las filas [r0, r1] que tocan el visor [vy1, vy2], las que mandan en la prioridad de generación: la de
     arriba y la de abajo sólo cuentan si se ve al menos `min_frac` de su alto, así que tras un salto se empieza por
@@ -1475,6 +1496,8 @@ class Sheet(Gtk.DrawingArea):
         self.on_drag_apply = None             # (timestamps, mode)    : aplica sobre la instantánea
         self.on_drag_end = None               # () -> None            : persistir / refrescar
         self.on_preview = None                # (t) -> None           : clic derecho = ampliar a ventana completa
+        self.on_marks_changed = None          # () -> None            : han cambiado las marcas rojas de la barra de scroll
+        self._bands = None                    # bandas de filas marcadas (mark_bands); None = recalcular
         self._drag = None
         self._anchor_t = None                 # última tesela pulsada con el botón izquierdo (para Shift+clic)
         self._pending_center = None   # instante a recentrar en cuanto se asigne la nueva altura
@@ -1513,6 +1536,7 @@ class Sheet(Gtk.DrawingArea):
             return
         changed = selected ^ self.selected
         self.selected = selected
+        self._marks_dirty()
         if len(changed) > 200:
             self.queue_draw()
         else:
@@ -1520,6 +1544,21 @@ class Sheet(Gtk.DrawingArea):
                 i = self.index.get(t)
                 if i is not None:
                     self._redraw_tile(i)
+
+    def _marks_dirty(self):
+        self._bands = None
+        if self.on_marks_changed:
+            self.on_marks_changed()
+
+    def mark_bands(self):
+        """Bandas [y0, y1) del contenido (coordenadas del mosaico) con teselas marcadas: filas enteras, las
+        consecutivas fundidas. Son las marcas rojas de la barra de scroll. Se recalculan sólo al cambiar la selección
+        o la geometría, no en cada repintado de la barra."""
+        if self._bands is None:
+            cols = max(1, self.cols)
+            rows = [i // cols for i in (self.index.get(t) for t in self.selected) if i is not None]
+            self._bands = mark_bands(rows, self._row_span)
+        return self._bands
 
     def _tiles_loaded(self, loaded):
         """El cargador ha decodificado estas miniaturas: repintar sólo sus teselas."""
@@ -1843,6 +1882,7 @@ class Sheet(Gtk.DrawingArea):
         # altura propia, del mismo redondeo con que se dibujan (_tile_rect)
         self._snap_tops = [int(round(v)) for v in self.row_y] if self.row_y is not None else None
         self._natural_h = total_h
+        self._marks_dirty()   # las filas han podido cambiar de sitio: las marcas de la barra también
         self._apply_height()
         if self.snap:
             self._snap_soon()   # las filas pueden haber cambiado de sitio: volver a una parada
@@ -2294,10 +2334,10 @@ class Preview(Gtk.DrawingArea):
         pb = self.pixbuf
         if pb is not None:
             pw, ph = pb.get_width(), pb.get_height()
-            sc = min(aw / float(pw), ah / float(ph))
-            dw, dh = pw * sc, ph * sc
+            x, y, dw, dh = fit_rect(pw, ph, aw, ah)
+            sc = dw / float(pw)
             cr.save()
-            cr.translate((aw - dw) / 2.0, (ah - dh) / 2.0)
+            cr.translate(x, y)
             cr.scale(sc, sc)
             Gdk.cairo_set_source_pixbuf(cr, pb, 0, 0)
             cr.get_source().set_filter(cairo.FILTER_GOOD if sc < 1 else cairo.FILTER_BILINEAR)
@@ -2461,29 +2501,45 @@ class Player(object):
 
 
 class PreviewLayer(Gtk.Box):
-    """Capa de la vista ampliada: arriba el fotograma fijo o el vídeo; abajo play/pausa, barra de progreso
-    (arrastrable: hace de scrubber), tiempo y cerrar."""
+    """Capa de la vista ampliada: arriba el fotograma fijo o el vídeo, con un recuadro rojo encima cuando lo que se
+    ve cae en un segmento marcado (set_marked); abajo play/pausa, barra de progreso (arrastrable: hace de scrubber),
+    tiempo y cerrar. La rueda sobre la imagen o el vídeo llega por on_wheel(event)."""
+
+    MARK_W = 6   # grosor del recuadro rojo
 
     def __init__(self):
         super(PreviewLayer, self).__init__(orientation=Gtk.Orientation.VERTICAL)
         self.on_close = None
         self.on_toggle_play = None
         self.on_seek = None
+        self.on_wheel = None
         self.duration = 1.0
         self._dragging = False
         self._updating = False
+        self.marked = False
+        self.video_aspect = None   # ancho/alto del vídeo cargado, para encajar el recuadro como lo encaja el sink
         self.stack = Gtk.Stack()
         self.stack.set_homogeneous(True)
         self.still = Preview()
         self.still.set_no_show_all(False)   # Preview nace con no_show_all (era la capa entera); aquí es un hijo normal
         self.still.on_close = lambda: self.on_close() if self.on_close else None
+        self.still.add_events(Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.SMOOTH_SCROLL_MASK)
         self.stack.add_named(self.still, "still")
         self.video_box = Gtk.EventBox()
         self.video_box.get_style_context().add_class("ts-black")
-        self.video_box.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
+        self.video_box.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.SMOOTH_SCROLL_MASK)
         self.video_box.connect("button-press-event", lambda w, e: (self.on_toggle_play() if self.on_toggle_play else None) or True)
         self.stack.add_named(self.video_box, "video")
-        self.pack_start(self.stack, True, True, 0)
+        # el recuadro rojo va en una capa transparente sobre el fotograma o el vídeo (al sink no se le puede pintar encima)
+        self.view = Gtk.Overlay()
+        self.view.add(self.stack)
+        self.frame = Gtk.DrawingArea()
+        self.frame.set_has_window(False)   # sin ventana propia: transparente y sin robar clics ni rueda
+        self.frame.connect("draw", self._draw_mark)
+        self.view.add_overlay(self.frame)
+        self.view.set_overlay_pass_through(self.frame, True)
+        self.pack_start(self.view, True, True, 0)
+        self.connect("scroll-event", lambda w, e: bool(self.on_wheel(e)) if self.on_wheel else False)
 
         bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
         bar.get_style_context().add_class("ts-preview-bar")
@@ -2491,7 +2547,7 @@ class PreviewLayer(Gtk.Box):
         self.play_icon = Gtk.Image.new_from_icon_name("media-playback-start-symbolic", Gtk.IconSize.BUTTON)
         self.play_btn.add(self.play_icon)
         self.play_btn.set_relief(Gtk.ReliefStyle.NONE)
-        self.play_btn.set_tooltip_text("Reproducir / pausar (espacio). Flechas: ±intervalo")
+        self.play_btn.set_tooltip_text("Reproducir / pausar (espacio). Flechas o rueda: ±intervalo; con Ctrl, ±1 s")
         self.play_btn.connect("clicked", lambda *_: self.on_toggle_play() if self.on_toggle_play else None)
         bar.pack_start(self.play_btn, False, False, 0)
         self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 0.1)
@@ -2524,16 +2580,57 @@ class PreviewLayer(Gtk.Box):
         return self._dragging
 
     def show_still(self, pixbuf, t, label):
-        self.still.set_frame(pixbuf, t, label)
+        self.update_still(pixbuf, t, label)
         self.stack.set_visible_child_name("still")
         self.set_playing(False)
 
-    def show_video(self):
+    def update_still(self, pixbuf, t, label):
+        """Otro fotograma (o el mismo a más resolución): el recuadro se reencaja con él."""
+        self.still.set_frame(pixbuf, t, label)
+        self.frame.queue_draw()
+
+    def show_video(self, aspect=None):
+        self.video_aspect = aspect
         self.stack.set_visible_child_name("video")
+        self.frame.queue_draw()
 
     def attach_video(self, widget):
+        widget.add_events(Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.SMOOTH_SCROLL_MASK)
         self.video_box.add(widget)
         widget.show()
+
+    def set_marked(self, on):
+        """Recuadro rojo sí/no. Devuelve True si ha cambiado."""
+        on = bool(on)
+        if on == self.marked:
+            return False
+        self.marked = on
+        self.frame.queue_draw()
+        return True
+
+    def image_rect(self):
+        """Dónde se ve la imagen dentro de la capa: el fotograma encajado (modo fijo) o el vídeo encajado por su
+        aspecto (como hace el sink); si no se sabe, toda la capa."""
+        alloc = self.frame.get_allocation()
+        aw, ah = max(1, alloc.width), max(1, alloc.height)
+        if self.stack.get_visible_child_name() == "still":
+            pb = self.still.pixbuf
+            if pb is not None:
+                return fit_rect(pb.get_width(), pb.get_height(), aw, ah)
+        elif self.video_aspect:
+            return fit_rect(self.video_aspect, 1.0, aw, ah)
+        return 0.0, 0.0, float(aw), float(ah)
+
+    def _draw_mark(self, widget, cr):
+        if not self.marked:
+            return False
+        x, y, w, h = self.image_rect()
+        lw = self.MARK_W
+        cr.set_source_rgb(0.93, 0.16, 0.16)   # el rojo de las teselas marcadas
+        cr.set_line_width(lw)
+        cr.rectangle(x + lw / 2.0, y + lw / 2.0, max(lw, w - lw), max(lw, h - lw))
+        cr.stroke()
+        return False
 
     def set_duration(self, d):
         self.duration = max(0.1, float(d))
@@ -2721,6 +2818,12 @@ class Selection(object):
             if y > b:
                 out.append((b, y))
         self.segments = self._normalize(out)
+
+    def contains(self, s):
+        """¿Cae el instante s dentro de algún segmento [a, b)?"""
+        s = float(s)
+        i = bisect.bisect_right(self.segments, (s, float("inf"))) - 1
+        return i >= 0 and self.segments[i][0] <= s < self.segments[i][1]
 
     @staticmethod
     def tile_range(t, interval, duration):
@@ -3703,6 +3806,7 @@ class ThumbSheet(Gtk.Window):
         self.layer.on_close = self.hide_preview
         self.layer.on_toggle_play = self.toggle_play
         self.layer.on_seek = self.preview_seek
+        self.layer.on_wheel = self._preview_wheel
         self.overlay.add_overlay(self.layer)
         self.toast = Toast()
         self.overlay.add_overlay(self.toast)
@@ -3711,6 +3815,8 @@ class ThumbSheet(Gtk.Window):
         self._player_doc = None
         self._tick_id = None
         self._seek_id = None
+        self._seek_at = None    # (instante pedido, momento) del último seek: base de los pasos encadenados de flechas
+                                # o rueda mientras el reproductor aún informa de la posición anterior
         # extracción de fotogramas completos: un solo hilo, atiende primero lo último pedido (LIFO) y
         # descarta lo que ya exista; así mantener pulsada una flecha no lanza decenas de ffmpeg
         self._full_lock = threading.Condition()
@@ -3759,8 +3865,11 @@ class ThumbSheet(Gtk.Window):
         self.sheet.on_drag_apply = self.on_drag_apply
         self.sheet.on_drag_end = self.on_drag_end
         self.sheet.on_preview = self.show_preview
+        self.sheet.on_marks_changed = self._marks_changed
         self._sel_snapshot = None
         self.scroller.add(self.sheet)
+        self._marks_logged = None
+        self.scroller.get_vscrollbar().connect_after("draw", self._draw_scroll_marks)   # marcas rojas de los segmentos
         self.paned.pack2(self.scroller, True, False)
         self.paned.set_position(int(self.settings.get("panel_w", 240)))
 
@@ -4809,6 +4918,7 @@ class ThumbSheet(Gtk.Window):
         doc.save_selection()
         self._refresh_status()
         self._update_buttons()
+        self._refresh_mark()
 
     def select_all(self):
         """Ctrl+A: todo el vídeo como un único segmento."""
@@ -4821,6 +4931,7 @@ class ThumbSheet(Gtk.Window):
         doc.save_selection()
         self._refresh_status()
         self._update_buttons()
+        self._refresh_mark()
 
     # ---- vista ampliada (clic derecho) -----------------------------------------------------------
     def show_preview(self, t):
@@ -4842,6 +4953,9 @@ class ThumbSheet(Gtk.Window):
         self.layer.set_duration(doc.info.duration)
         self.layer.set_position(t)
         self.layer.show()
+        self._refresh_mark()
+        if DEBUG:
+            log("ampliada: %s (%s)" % (fmt_time(t), "marcada" if self.layer.marked else "sin marcar"))
         full = doc.cache_dir / "full" / ("%d.jpg" % t)
         if full.exists():
             self._preview_loaded(doc, t, full)
@@ -4857,7 +4971,7 @@ class ThumbSheet(Gtk.Window):
         return min(range(len(ts)), key=lambda k: abs(ts[k] - t))
 
     def _preview_step(self, delta):
-        """Flechas izquierda/derecha en la vista ampliada: fotograma anterior/siguiente."""
+        """Flechas izquierda/derecha (o rueda) en la vista ampliada: fotograma anterior/siguiente."""
         if self._preview_key is None or not self.sheet.ts:
             return
         doc, t = self._preview_key
@@ -4865,6 +4979,55 @@ class ThumbSheet(Gtk.Window):
         i = max(0, min(len(ts) - 1, self._tile_index(t) + delta))
         if ts and ts[i] != t:
             self.show_preview(ts[i])
+
+    def _preview_nudge(self, n, fine):
+        """Flechas o rueda en la vista ampliada: n pasos (negativo = atrás). Con el vídeo cargado, cada paso es un
+        intervalo (`fine`, Ctrl: un segundo), encadenados sobre el último seek pedido aunque el reproductor aún no
+        lo refleje. En modo fotograma, tesela anterior/siguiente; con Ctrl, el vídeo en pausa en t ± n s (como el
+        scrubber), que es el único modo de ver un instante que no es de la rejilla."""
+        if self._preview_key is None:
+            return
+        dur = self.layer.duration
+        if self._player_doc is not None:
+            step = 1.0 if fine else self.current_interval()
+            if self._seek_at is not None and time.monotonic() - self._seek_at[1] < 0.5:
+                pos = self._seek_at[0]
+            else:
+                pos = self.player.position()
+                if pos is None:
+                    pos = self.layer.scale.get_value()
+            self.preview_seek(max(0.0, min(dur, pos + n * step)))
+        elif fine:
+            self.preview_seek(max(0.0, min(dur, self._preview_key[1] + n)))
+        else:
+            self._preview_step(n)
+
+    def _preview_wheel(self, event):
+        """Rueda sobre la vista ampliada: abajo avanza y arriba retrocede, igual que las flechas (Ctrl: ±1 s)."""
+        n = self._wheel_steps(event, "preview")
+        if n:
+            self._preview_nudge(-n, bool(event.state & Gdk.ModifierType.CONTROL_MASK))
+        return True
+
+    def _refresh_mark(self):
+        """Recuadro rojo de la vista ampliada: en modo fotograma, si la tesela está marcada (como en el mosaico);
+        con el vídeo cargado, si el instante actual (o el último seek pedido, hasta que el reproductor lo refleje)
+        cae dentro de un segmento."""
+        if self._preview_key is None or not self.layer.get_visible():
+            return
+        doc, t = self._preview_key
+        if self._player_doc is not None:
+            if self._seek_at is not None and time.monotonic() - self._seek_at[1] < 0.5:
+                pos = self._seek_at[0]
+            else:
+                pos = self.player.position()
+                if pos is None:
+                    pos = self.layer.scale.get_value()
+            on = doc.selection.contains(pos)
+        else:
+            on = t in self.sheet.selected
+        if self.layer.set_marked(on) and DEBUG:
+            log("marca: %s" % ("dentro de un segmento" if on else "fuera"))
 
     def _request_full(self, doc, timestamps):
         with self._full_lock:
@@ -4922,7 +5085,7 @@ class ThumbSheet(Gtk.Window):
             pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(str(full), w, h, True)
         except GLib.Error:
             return False
-        self.layer.still.set_frame(pb, t, doc.path.name)
+        self.layer.update_still(pb, t, doc.path.name)
         return False
 
     def hide_preview(self):
@@ -4970,8 +5133,10 @@ class ThumbSheet(Gtk.Window):
             return None
         p.load(doc.path, start_s, play)
         self._player_doc = doc
-        self.layer.show_video()
+        self._seek_at = None
+        self.layer.show_video(doc.info.aspect if doc.info is not None else None)
         self.layer.set_position(start_s)
+        self._refresh_mark()
         if self._tick_id is None:
             self._tick_id = GLib.timeout_add(100, self._player_tick)
         log("player: carga %s desde %.1f (%s)" % (doc.path.name, start_s, "play" if play else "pausa"))
@@ -4981,6 +5146,7 @@ class ThumbSheet(Gtk.Window):
         if self.player is not None and self._player_doc is not None:
             self.player.stop()
         self._player_doc = None
+        self._seek_at = None
         for attr in ("_tick_id", "_seek_id"):
             sid = getattr(self, attr)
             if sid:
@@ -5007,6 +5173,7 @@ class ThumbSheet(Gtk.Window):
         if self._player_doc is None:
             self._start_player(s, False)
             return
+        self._seek_at = (s, time.monotonic())
         if self._seek_id:
             GLib.source_remove(self._seek_id)
         self._seek_id = GLib.timeout_add(60, self._do_seek, s)
@@ -5016,6 +5183,7 @@ class ThumbSheet(Gtk.Window):
         if self._player_doc is not None:
             self.player.seek(s)
             self.layer.set_position(s)
+            self._refresh_mark()
             log("player: seek a %.2f" % s)
         return False
 
@@ -5026,6 +5194,7 @@ class ThumbSheet(Gtk.Window):
         pos = self.player.position()
         if pos is not None:
             self.layer.set_position(pos)
+        self._refresh_mark()
         return True
 
     def _on_player_state(self, playing):
@@ -5041,6 +5210,7 @@ class ThumbSheet(Gtk.Window):
         self._flash("No se pudo reproducir: %s" % message)
         self._stop_player()
         self.layer.stack.set_visible_child_name("still")
+        self._refresh_mark()
 
     # ---- cortar y unir ----------------------------------------------------------------------------
     def on_cut(self, *_):
@@ -5557,6 +5727,31 @@ class ThumbSheet(Gtk.Window):
             scale.set_value(scale.get_value() + n * step)
         return True
 
+    def _marks_changed(self):
+        self.scroller.get_vscrollbar().queue_draw()
+
+    def _draw_scroll_marks(self, vb, cr):
+        """Tras el dibujado normal de la barra de scroll: una marca roja en el canal por cada tramo de filas con
+        teselas marcadas, en su sitio proporcional al contenido (las bandas vienen ya calculadas del mosaico)."""
+        bands = self.sheet.mark_bands()
+        if DEBUG and len(bands) != self._marks_logged:
+            self._marks_logged = len(bands)
+            log("marcas: %d bandas" % len(bands))
+        if not bands:
+            return False
+        adj = self.scroller.get_vadjustment()
+        upper = adj.get_upper()
+        if upper <= 0:
+            return False
+        rr = vb.get_range_rect()   # el canal, en coordenadas de la barra
+        cr.set_source_rgba(0.93, 0.16, 0.16, 0.9)
+        for y0, y1 in bands:
+            a = rr.y + rr.height * y0 / upper
+            b = rr.y + rr.height * y1 / upper
+            cr.rectangle(rr.x + 3, a, max(1, rr.width - 6), max(2.0, b - a))
+        cr.fill()
+        return False
+
     def on_scroll(self, widget, event):
         """Rueda sobre el mosaico. Sin Ctrl: desplazar (GTK; con «Snap scroll», filas enteras). Zoom:
         Ctrl+rueda: tamaño de las teselas (arriba, más grandes). Ctrl+Mayús+rueda:
@@ -5598,23 +5793,15 @@ class ThumbSheet(Gtk.Window):
             if event.keyval == Gdk.KEY_space:
                 self.toggle_play()
                 return True
-            if event.keyval in (Gdk.KEY_Left, Gdk.KEY_Right, Gdk.KEY_Home, Gdk.KEY_End):
+            if event.keyval in (Gdk.KEY_Left, Gdk.KEY_Right):
+                # ±intervalo (vídeo) o tesela anterior/siguiente (fotograma); con Ctrl, ±1 s
+                self._preview_nudge(-1 if event.keyval == Gdk.KEY_Left else 1, bool(ctrl))
+                return True
+            if event.keyval in (Gdk.KEY_Home, Gdk.KEY_End):
                 if self._player_doc is not None:
-                    # con vídeo cargado: saltar un intervalo (o al principio / final)
-                    S = self.current_interval()
-                    dur = self.layer.duration
-                    pos = self.player.position()
-                    if pos is None:
-                        pos = self.layer.scale.get_value()
-                    target = {Gdk.KEY_Left: pos - S, Gdk.KEY_Right: pos + S, Gdk.KEY_Home: 0.0,
-                              Gdk.KEY_End: max(0.0, dur - 0.5)}[event.keyval]
-                    self.preview_seek(max(0.0, min(dur, target)))
-                elif event.keyval == Gdk.KEY_Home:
-                    self._preview_step(-10 ** 9)
-                elif event.keyval == Gdk.KEY_End:
-                    self._preview_step(10 ** 9)
+                    self.preview_seek(0.0 if event.keyval == Gdk.KEY_Home else max(0.0, self.layer.duration - 0.5))
                 else:
-                    self._preview_step(-1 if event.keyval == Gdk.KEY_Left else 1)
+                    self._preview_step(-10 ** 9 if event.keyval == Gdk.KEY_Home else 10 ** 9)
                 return True
         if ctrl and event.keyval in (Gdk.KEY_q, Gdk.KEY_w):
             self.destroy()

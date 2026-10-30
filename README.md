@@ -46,7 +46,9 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
 - **Orden de generación**: lo que está en pantalla se genera primero, luego lo que viene por delante y al
   final lo que ha quedado atrás al hacer scroll; la cola se reordena con cada movimiento, así que en un
   equipo lento puedes avanzar por la sábana más deprisa de lo que se genera y ver siempre lo que miras.
-  Sólo cambia el orden, no el trabajo: el tiempo total es el mismo.
+  Cuenta como en pantalla la fila que se ve al menos a la mitad: la que sólo asoma un trozo por arriba o por
+  abajo no manda, y tras un salto se empieza por la primera fila que se ve entera. Sólo cambia el orden, no el
+  trabajo: el tiempo total es el mismo.
 - **Estado**: junto a los botones, arriba el mensaje (capturas, duración, resolución, segmentos) y
   abajo una barra de progreso: generación del vídeo actual, generación en segundo plano (con el nombre
   del fichero) o avance del corte, con el tiempo que falta estimado por el ritmo medio de la operación

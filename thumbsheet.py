@@ -1418,6 +1418,19 @@ def snap_height(n, pitch, natural_h, page, tops=None):
     return max(natural_h, int(math.ceil(snap_top(snap_last(n, pitch, natural_h, page, tops), pitch, tops) + page)))
 
 
+def focus_rows(r0, r1, span, vy1, vy2, min_frac=0.5):
+    """De las filas [r0, r1] que tocan el visor [vy1, vy2], las que mandan en la prioridad de generación: la de
+    arriba y la de abajo sólo cuentan si se ve al menos `min_frac` de su alto, así que tras un salto se empieza por
+    la primera fila que se ve entera y no por la que asoma un trozo. `span(r)` = (y, alto) de las teselas de la
+    fila. Si ninguna llega (visor más bajo que una fila), todas las que tocan."""
+    def frac(r):
+        top, h = span(r)
+        return max(0.0, min(top + h, vy2) - max(top, vy1)) / max(float(h), 1e-9)
+    f0 = r0 + 1 if frac(r0) < min_frac else r0
+    f1 = r1 - 1 if frac(r1) < min_frac else r1
+    return (f0, f1) if f0 <= f1 else (r0, r1)
+
+
 class Sheet(Gtk.DrawingArea):
     GAP = 6
     PAD = 8
@@ -1447,7 +1460,7 @@ class Sheet(Gtk.DrawingArea):
         self.vadj = None                      # ajuste vertical del ScrolledWindow (lo pone la ventana)
         self.cache = PixCache(PIX_BUDGET)
         self.visible = (0, -1)
-        self.visible_core = (0, -1)   # a la vista de verdad (sin el margen de precarga): prioridad de generación
+        self.visible_core = (0, -1)   # a la vista de verdad (sin margen; filas vistas al menos a la mitad): prioridad de generación
         self.vis_lock = threading.Lock()
         self.settled = True
         self._settle_id = None
@@ -1949,6 +1962,13 @@ class Sheet(Gtk.DrawingArea):
                     out.append(i)
         return out
 
+    def _row_span(self, r):
+        """(y, alto) de las teselas de la fila r en coordenadas del mosaico (PAD incluido)."""
+        if not self.row_y:
+            return self.PAD + r * (self.cell_h + self.GAP), self.cell_h
+        r = min(r, len(self.row_y) - 1)
+        return self.PAD + self.row_y[r], self.row_h[r]
+
     def _tile_rect(self, i):
         r, c = divmod(i, self.cols)
         if self.row_y is None or i >= len(self.tile_x):
@@ -1963,8 +1983,9 @@ class Sheet(Gtk.DrawingArea):
         self.queue_draw_area(x, y, w, h)
 
     def focus_range(self):
-        """[t_lo, t_hi] de las teselas a la vista (sin margen), o None si aún no se ha dibujado el plan.
-        Lo lee el generador desde sus hilos para decidir qué captura va primero."""
+        """[t_lo, t_hi] de las teselas a la vista (sin margen, y sin la fila que asoma menos de la mitad por arriba
+        o por abajo), o None si aún no se ha dibujado el plan. Lo lee el generador desde sus hilos para decidir qué
+        captura va primero."""
         with self.vis_lock:
             a, b = self.visible_core
         ts = self.ts
@@ -2046,11 +2067,15 @@ class Sheet(Gtk.DrawingArea):
         vr0 = max(0, self._row_of_y(vy1 - self.PAD))
         vr1 = self._row_of_y(vy2 - self.PAD)
         core = (vr0 * self.cols, min(len(self.ts) - 1, (vr1 + 1) * self.cols - 1))
+        # prioridad de generación: sólo las filas que se ven al menos a la mitad; la que asoma menos por arriba o
+        # por abajo no manda, y tras un salto se empieza por la primera que se ve entera (ver focus_rows)
+        fr0, fr1 = focus_rows(vr0, vr1, self._row_span, vy1, vy2)
+        focus = (fr0 * self.cols, min(len(self.ts) - 1, (fr1 + 1) * self.cols - 1))
         # precarga: una pantalla por delante y por detrás para que el scroll corto no muestre huecos
         margin = self.cols * max(1, int(math.ceil((vy2 - vy1) / float(row_h))))
         with self.vis_lock:
             self.visible = (max(0, core[0] - margin), min(len(self.ts) - 1, core[1] + margin))
-            self.visible_core = core
+            self.visible_core = focus
             vis_changed = self.visible != self._prev_visible
             self._prev_visible = self.visible
         if DEBUG:

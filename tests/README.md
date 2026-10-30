@@ -45,6 +45,9 @@
   cargar, y después uno nuevo en la carpeta vacía, otro en la subcarpeta escondida (que reaparece) y una subcarpeta
   nueva movida con un vídeo dentro, y los cuatro se generan en segundo plano; el `-cortado` que escribe la app no se carga; al desactivarla no entra nada; ojo y vigilancia se
   guardan por carpeta y se restauran al reabrir.
+- `test_focus.py` — sin pantalla, instantáneo: `focus_rows`, las filas que mandan en la prioridad de generación: la
+  que asoma por arriba o por abajo sólo cuenta si se ve al menos la mitad de su alto (se empieza por la primera que
+  se ve entera); si ninguna llega, todas las que tocan; rejilla regular y filas de altura propia.
 - `test_loader.py` — sin ventana, instantáneo: el cargador de miniaturas atiende lo visible antes que la precarga
   (y lo visible de arriba abajo), descarta lo que ya no está a la vista ni en el margen, y una petición visible
   saca la tesela de la cola de precarga.

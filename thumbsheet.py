@@ -2548,7 +2548,8 @@ class PreviewLayer(Gtk.Box):
         self.play_btn.add(self.play_icon)
         self.play_btn.set_relief(Gtk.ReliefStyle.NONE)
         self.play_btn.set_tooltip_text("Reproducir / pausar (espacio). Flechas o rueda: ±intervalo; con Ctrl, ±1 s. "
-                                       "Mayús: marca o desmarca lo que se ve; con Mayús pulsada, la rueda arrastra la selección")
+                                       "Mayús: marca lo que se ve (pulsada y soltada sobre algo marcado, lo desmarca); "
+                                       "con Mayús pulsada, la rueda sigue marcando por donde pasa")
         self.play_btn.connect("clicked", lambda *_: self.on_toggle_play() if self.on_toggle_play else None)
         bar.pack_start(self.play_btn, False, False, 0)
         self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 0.1)
@@ -3818,7 +3819,8 @@ class ThumbSheet(Gtk.Window):
         self._seek_id = None
         self._seek_at = None    # (instante pedido, momento) del último seek: base de los pasos encadenados de flechas
                                 # o rueda mientras el reproductor aún informa de la posición anterior
-        self._shift_drag = None   # Mayús pulsada en la vista ampliada: {"i0": tesela ancla, "mode": True = marcar}
+        self._shift_drag = None   # Mayús pulsada en la vista ampliada: {"i0": tesela ancla, "moved": ha habido pasos,
+                                  # "unmark": la ancla ya estaba marcada (se desmarca al soltar si no ha habido pasos)}
         # extracción de fotogramas completos: un solo hilo, atiende primero lo último pedido (LIFO) y
         # descarta lo que ya exista; así mantener pulsada una flecha no lanza decenas de ffmpeg
         self._full_lock = threading.Condition()
@@ -3888,7 +3890,7 @@ class ThumbSheet(Gtk.Window):
         self.scroller.connect("scroll-event", self.on_scroll)
         self.connect("key-press-event", self.on_key)
         self.connect("key-release-event", self.on_key_release)
-        self.connect("focus-out-event", lambda *_: (self._shift_end(), False)[1])   # Mayús soltada fuera de la ventana
+        self.connect("focus-out-event", lambda *_: (self._shift_end(unmark=False), False)[1])   # Mayús soltada fuera
         self.connect("destroy", self.on_destroy)
         self.connect("window-state-event", self.on_window_state)
         self._maximized = bool(self.settings.get("maximized"))
@@ -5031,31 +5033,44 @@ class ThumbSheet(Gtk.Window):
         return True
 
     def _shift_begin(self):
-        """Mayús en la vista ampliada: alterna la tesela que se ve (su tramo entra o sale de los segmentos, como un
-        clic en el mosaico) y deja abierto un arrastre: mientras siga pulsada, cada paso de rueda o flecha aplica lo
-        mismo a las teselas por las que pasa, como arrastrar con el ratón en el mosaico. Se cierra al soltarla."""
+        """Mayús en la vista ampliada: marca la tesela que se ve (su tramo entra en los segmentos, como un clic en el
+        mosaico) y deja abierto un arrastre: mientras siga pulsada, cada paso de rueda o flecha marca también las
+        teselas por las que pasa, como arrastrar con el ratón en el mosaico. Si la tesela ya estaba marcada no se
+        toca al pulsar, para poder seguir marcando desde ella con el scroll; se desmarca al SOLTAR Mayús si no ha
+        habido ningún paso (pulsar y soltar = desmarcar)."""
         if self._shift_drag is not None:   # repetición automática de la tecla
             return
         i = self._preview_tile_index()
         if i is None or self.current is None or self.current.info is None:
             return
-        self._shift_drag = {"i0": i, "mode": self.sheet.ts[i] not in self.sheet.selected}
+        marked = self.sheet.ts[i] in self.sheet.selected
+        self._shift_drag = {"i0": i, "moved": False, "unmark": marked}
         self.on_drag_begin()
-        self._shift_apply(i)
+        if not marked:
+            self._shift_apply(i)
 
     def _shift_apply(self, i):
         d, ts = self._shift_drag, self.sheet.ts
         lo, hi = min(d["i0"], i), max(d["i0"], i)
-        self.on_drag_apply(ts[lo:hi + 1], d["mode"])
+        if i != d["i0"]:
+            d["moved"] = True
+        self.on_drag_apply(ts[lo:hi + 1], True)
         self._refresh_mark()
         if DEBUG:
-            log("mayús: %s %s..%s" % ("marcar" if d["mode"] else "desmarcar", fmt_time(ts[lo]), fmt_time(ts[hi])))
+            log("mayús: marcar %s..%s" % (fmt_time(ts[lo]), fmt_time(ts[hi])))
 
-    def _shift_end(self):
-        """Se suelta Mayús (o se cierra la vista, o la ventana pierde el foco): lo arrastrado queda hecho y guardado."""
-        if self._shift_drag is None:
+    def _shift_end(self, unmark=True):
+        """Se suelta Mayús: lo marcado queda hecho y guardado; si se pulsó sobre una tesela marcada y no ha habido pasos,
+        se desmarca ahora. Al cerrar la vista o perder el foco la ventana (unmark=False) sólo se cierra el arrastre."""
+        d = self._shift_drag
+        if d is None:
             return
         self._shift_drag = None
+        if unmark and d["unmark"] and not d["moved"]:
+            t = self.sheet.ts[d["i0"]]
+            self.on_drag_apply([t], False)
+            if DEBUG:
+                log("mayús: desmarcar %s (al soltar)" % fmt_time(t))
         self.on_drag_end()
         self._refresh_mark()
 
@@ -5133,11 +5148,18 @@ class ThumbSheet(Gtk.Window):
         return False
 
     def hide_preview(self):
-        self._shift_end()
+        self._shift_end(unmark=False)
+        t = None
+        if self._preview_key is not None:   # al volver al mosaico, centrado en lo último visto: la tesela o el instante del vídeo
+            t = self._preview_pos() if self._player_doc is not None else self._preview_key[1]
         self._preview_key = None
         self._stop_player()
         if self.layer.get_visible():
             self.layer.hide()
+            if t is not None:
+                if DEBUG:
+                    log("ampliada: cerrada en %s" % fmt_time(t))
+                self.sheet.scroll_to_time(t)
             GLib.idle_add(self._start_next_background)
 
     # ---- reproducción (GStreamer) dentro de la vista ampliada -----------------------------------

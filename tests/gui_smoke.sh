@@ -114,8 +114,13 @@ chk "una muesca arriba: tesela $((5*S0)) s, fuera → sin recuadro" "$(amp)" "am
 xdotool keydown shift; sleep 0.4; xdotool click 4; sleep 0.9; xdotool keyup shift; sleep 0.7   # 300 s se marca; rueda arriba → 240 s también
 chk "Mayús en $((5*S0)) s y rueda arriba con Mayús: $((4*S0))–$((6*S0)) se marca y se funde con el segmento" "$(sel)" "$(seg $((4*S0)) $B)"
 grep -q "mayús: marcar $(mmss $((4*S0)))..$(mmss $((5*S0)))" "$OUT/app.log" && ok "traza del arrastre con Mayús (marcar $(mmss $((4*S0)))..$(mmss $((5*S0))))" || ko "sin traza «mayús: marcar»: $(grep 'mayús' "$OUT/app.log" | tail -1)"
-xdotool keydown shift; sleep 0.4; xdotool click 5; sleep 0.9; xdotool keyup shift; sleep 0.7   # 240 s (marcada) se desmarca; rueda abajo → 300 s también
-chk "Mayús otra vez (desmarcar) y rueda abajo con Mayús: vuelve a quedar $A–$B" "$(sel)" "$E2"
+xdotool keydown shift; sleep 0.4; xdotool click 4; sleep 0.9; xdotool keyup shift; sleep 0.7   # 240 s ya marcada: no se desmarca; rueda arriba → 180 s se marca
+chk "Mayús sobre una marcada ($((4*S0)) s) y rueda arriba: sigue marcando, $((3*S0))–$B" "$(sel)" "$(seg $((3*S0)) $B)"
+xdotool key shift; sleep 0.7                       # pulsar y soltar sobre 180 s (marcada), sin moverse: se desmarca
+chk "pulsar y soltar Mayús sobre $((3*S0)) s marcada: se desmarca al soltar" "$(sel)" "$(seg $((4*S0)) $B)"
+grep -q "mayús: desmarcar $(mmss $((3*S0))) (al soltar)" "$OUT/app.log" && ok "traza del desmarcado al soltar" || ko "sin traza «mayús: desmarcar … (al soltar)»: $(grep 'mayús' "$OUT/app.log" | tail -1)"
+xdotool click 5; sleep 0.8; xdotool key shift; sleep 0.7; xdotool click 5; sleep 0.8; xdotool key shift; sleep 0.7   # 240 y 300: dos toques más
+chk "dos toques más (en $((4*S0)) y $((5*S0)) s): vuelve a quedar $A–$B" "$(sel)" "$E2"
 xdotool click 5; sleep 0.9
 P0=$((6*S0))
 xdotool key space; sleep 3; shot 4e-reproduciendo 0.2; xdotool key space; sleep 0.6
@@ -132,15 +137,22 @@ xdotool mousemove $((X+700)) $((Y+400)) click 5; sleep 0.8; SK3=$(lastseek)   # 
 near "$SK3" "$(python3 -c "print(float('$SK2')+$S0)")" && ok "rueda abajo sobre el vídeo: seek +$S0 s (a $SK3)" || ko "rueda abajo: seek '$SK3' (esperado $SK2+$S0)"
 xdotool keydown ctrl click 4 keyup ctrl; sleep 0.8; SK4=$(lastseek)   # Ctrl+rueda arriba: -1 s
 near "$SK4" "$(python3 -c "print(float('$SK3')-1)")" && ok "Ctrl+rueda arriba sobre el vídeo: seek -1 s (a $SK4)" || ko "Ctrl+rueda arriba: seek '$SK4' (esperado $SK3-1)"
-xdotool key shift; sleep 0.8   # Mayús con el vídeo en pausa en ~$SK4 s: el tramo de su tesela ($((8*S0))–$((9*S0))) sale de la selección
-chk "Mayús con el vídeo en $SK4 s: el tramo $((8*S0))–$((9*S0)) sale del segmento" "$(sel)" "$(seg $A $((8*S0)) $((9*S0)) $B)"
+xdotool key shift; sleep 0.8   # pulsar y soltar Mayús con el vídeo en pausa en ~$SK4 s: el tramo de su tesela ($((8*S0))–$((9*S0))) sale de la selección
+chk "Mayús (toque) con el vídeo en $SK4 s: el tramo $((8*S0))–$((9*S0)) sale del segmento" "$(sel)" "$(seg $A $((8*S0)) $((9*S0)) $B)"
 xdotool key shift; sleep 0.8
 chk "Mayús otra vez: el tramo vuelve" "$(sel)" "$E2"
+xdotool keydown shift; sleep 0.4; xdotool click 5; sleep 0.4; xdotool click 5; sleep 0.9; xdotool keyup shift; sleep 0.8   # desde un tramo marcado, dos ruedas abajo (+2·S0): se sigue marcando hasta $((10*S0))–$((11*S0))
+chk "Mayús pulsada sobre un tramo marcado y dos ruedas abajo con el vídeo: sigue marcando hasta $((11*S0)) s" "$(sel)" "$(seg $A $((11*S0)))"
+xdotool key shift; sleep 0.8   # toque en ~$((10*S0)) s: ese tramo se desmarca y vuelve $A–$B
+chk "toque de Mayús en el tramo recién marcado: vuelve $A–$B" "$(sel)" "$E2"
+xdotool click 4; sleep 0.9   # rueda arriba: ~$((9*S0)) s, otra vez dentro del segmento (recuadro encendido)
 NF=$(grep -c "marca: fuera" "$OUT/app.log" || true)
 xdotool key End; sleep 1.2
 [[ "$(grep -c "marca: fuera" "$OUT/app.log" || true)" -gt "$NF" ]] && ok "Fin (fuera del segmento): el recuadro se apaga" || ko "al saltar al final el recuadro no se apagó"
 shot 4f-pausado-tras-seek 0.8
-xdotool key Escape; sleep 0.5
+xdotool key Escape; sleep 0.8
+CEN=$(grep -o "scroll: centrada t=[0-9]*" "$OUT/app.log" | tail -1 | sed 's/.*t=//')
+[[ "$CEN" == "$((23*S0))" ]] && ok "al cerrar con el vídeo al final, el mosaico se centra en su última tesela ($CEN s)" || ko "centrado al cerrar el vídeo: '$CEN' (esperado $((23*S0)))"
 xdotool mousemove $(tile 0 2) click 3; sleep 0.8; xdotool mousemove $((X+700)) $((Y+450)) click 1; sleep 0.5; shot 4d-vista-cerrada 0.3
 xdotool mousemove $(tile 0 2) click 3; sleep 0.8; xdotool windowfocus --sync "$WID"; xdotool key Escape; sleep 0.5
 chk "Esc cierra la vista ampliada sin tocar la selección" "$(sel)" "$E2"
@@ -202,6 +214,13 @@ to_cols 9; shot 8-mas-columnas 0.3
 to_cols 5; shot 9-menos-columnas 0.3
 [[ "$(ncols)" == 5 ]] && centrado_ok "$(centro)" "$(ahora)" "$(ncols)" "$(S)" && ok "menos columnas (5): la tesela central ($(centro) s) sigue centrada (ahora $(ahora) s)" || ko "menos columnas: cols=$(ncols) centro antes $(centro) s, después $(ahora) s"
 
+# 9c. al cerrar la vista ampliada, el mosaico queda centrado en la última tesela vista (aquí sí hay scroll: 5 s, 5 columnas)
+xdotool mousemove $((X+700)) $((Y+450)) click 3; sleep 1.0
+for i in 1 2 3 4 5 6 7 8; do xdotool click 5; sleep 0.3; done; sleep 0.8
+LAST=$(amp | sed 's/ampliada: \([0-9:]*\).*/\1/')
+xdotool key Escape; sleep 1.0
+CEN=$(grep -o "scroll: centrada t=[0-9]*" "$OUT/app.log" | tail -1 | sed 's/.*t=//')
+[[ -n "$CEN" && "$(mmss $CEN)" == "$LAST" ]] && ok "al cerrar la vista ampliada el mosaico se centra en la última tesela vista ($LAST)" || ko "centrado al cerrar: '$CEN' s, última vista '$LAST'"
 # 9b. Ctrl+A selecciona todo el vídeo como un único segmento
 xdotool windowfocus --sync "$WID"; xdotool key ctrl+a; sleep 0.6
 DUR=$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$COPY")

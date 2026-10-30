@@ -82,7 +82,9 @@
   También comprueba que la fila del panel de vídeos acaba con el tamaño del fichero.
 - `gui_smoke.sh <vídeo A> <vídeo B> [out]` — abre la app en un Xvfb propio (no toca tu pantalla) con
   COPIAS de A y de B (las dos se borran durante la prueba; los originales no se tocan), y con xdotool: rueda sobre el slider de intervalo, clic y arrastre de
-  teselas, un corte que falla a propósito (toast rojo; Esc lo cierra), Cortar, cambio de vídeo, Escape, Cortar y borrar original
+  teselas (marca roja en la barra de scroll), vista ampliada (flechas y rueda, recuadro rojo al entrar y salir de un segmento,
+  Mayús para marcar/desmarcar y arrastrar con la rueda, reproducción muda, seek ±intervalo y ±1 s con Ctrl), un corte que falla a
+  propósito (toast rojo; Esc lo cierra), Cortar, cambio de vídeo, Escape, Cortar y borrar original
   (doble pulsación: comprueba que una sola o una tardía no borran), Eliminar con confirmación, Ctrl+Q, y
   SIGKILL en plena generación. Deja capturas PNG en `out`. Requiere `Xvfb`,
   `xdotool`, `import` (ImageMagick). Caché y ajustes van aislados en `out`.

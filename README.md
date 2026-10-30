@@ -93,15 +93,19 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   ampliada y en una fracción de segundo la sustituye el fotograma a resolución nativa, que ffmpeg
   extrae aparte y queda en la caché (`full/`). Flechas `←`/`→` o la rueda (abajo avanza) pasan al fotograma
   anterior/siguiente (los vecinos se precargan), `Inicio`/`Fin` van al primero/último. Si la tesela está
-  marcada, el fotograma lleva un **recuadro rojo**, como en el mosaico. Se cierra con clic o `Esc`.
+  marcada, el fotograma lleva un **recuadro rojo**, como en el mosaico. `Mayús` marca o desmarca la tesela que se
+  ve (su tramo entra o sale de los segmentos, como un clic en el mosaico) y, mientras se mantiene pulsada, la rueda
+  o las flechas arrastran lo mismo por las teselas que recorren, como arrastrar con el ratón. Se cierra con clic o `Esc`.
 - **Reproducir desde ahí** (GStreamer, opcional): en la vista ampliada, `espacio` o el botón ▶ de la
   barra inferior reproduce el vídeo desde ese fotograma, con sonido, dentro de la misma ventana. La
   barra de progreso se puede arrastrar (hace de *scrubber*: en pausa muestra el fotograma exacto), las
   flechas y la rueda saltan ±intervalo (con `Ctrl`, ±1 s; en modo fotograma, `Ctrl` abre el vídeo en pausa
   en ese segundo, como el *scrubber*), clic sobre el vídeo pausa/reanuda, `Esc` cierra. El recuadro rojo se
   enciende y se apaga según el instante que se ve caiga o no dentro de un segmento, tanto reproduciendo como
-  al saltar. GStreamer elige solo el decodificador por hardware si lo hay (VA-API). Sin dispositivo de sonido,
-  reproduce en silencio. `THUMBSHEET_AUDIO=0` silencia siempre.
+  al saltar. `Mayús` marca o desmarca el tramo de la tesela a la que pertenece el instante que se ve, y con
+  `Mayús` pulsada la rueda o las flechas arrastran la selección por los tramos que recorren. GStreamer elige
+  solo el decodificador por hardware si lo hay (VA-API). Sin dispositivo de sonido, reproduce en silencio.
+  `THUMBSHEET_AUDIO=0` silencia siempre.
 - **Full**: el vídeo entero vale tal cual: lo renombra a `<vídeo>-cortado.<ext>` (mismo contenedor, el
   contenido no se toca, como si se hubiera cortado de principio a fin) y lo quita de la lista, tras
   confirmar (Intro acepta, Esc cancela). Si ya existe ese nombre usa `-cortado-2`, `-cortado-3`… La caché de

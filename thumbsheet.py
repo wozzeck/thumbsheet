@@ -2547,7 +2547,8 @@ class PreviewLayer(Gtk.Box):
         self.play_icon = Gtk.Image.new_from_icon_name("media-playback-start-symbolic", Gtk.IconSize.BUTTON)
         self.play_btn.add(self.play_icon)
         self.play_btn.set_relief(Gtk.ReliefStyle.NONE)
-        self.play_btn.set_tooltip_text("Reproducir / pausar (espacio). Flechas o rueda: ±intervalo; con Ctrl, ±1 s")
+        self.play_btn.set_tooltip_text("Reproducir / pausar (espacio). Flechas o rueda: ±intervalo; con Ctrl, ±1 s. "
+                                       "Mayús: marca o desmarca lo que se ve; con Mayús pulsada, la rueda arrastra la selección")
         self.play_btn.connect("clicked", lambda *_: self.on_toggle_play() if self.on_toggle_play else None)
         bar.pack_start(self.play_btn, False, False, 0)
         self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 0.1)
@@ -3817,6 +3818,7 @@ class ThumbSheet(Gtk.Window):
         self._seek_id = None
         self._seek_at = None    # (instante pedido, momento) del último seek: base de los pasos encadenados de flechas
                                 # o rueda mientras el reproductor aún informa de la posición anterior
+        self._shift_drag = None   # Mayús pulsada en la vista ampliada: {"i0": tesela ancla, "mode": True = marcar}
         # extracción de fotogramas completos: un solo hilo, atiende primero lo último pedido (LIFO) y
         # descarta lo que ya exista; así mantener pulsada una flecha no lanza decenas de ffmpeg
         self._full_lock = threading.Condition()
@@ -3885,6 +3887,8 @@ class ThumbSheet(Gtk.Window):
             sc.connect("button-release-event", self._slider_release)
         self.scroller.connect("scroll-event", self.on_scroll)
         self.connect("key-press-event", self.on_key)
+        self.connect("key-release-event", self.on_key_release)
+        self.connect("focus-out-event", lambda *_: (self._shift_end(), False)[1])   # Mayús soltada fuera de la ventana
         self.connect("destroy", self.on_destroy)
         self.connect("window-state-event", self.on_window_state)
         self._maximized = bool(self.settings.get("maximized"))
@@ -4990,24 +4994,70 @@ class ThumbSheet(Gtk.Window):
         dur = self.layer.duration
         if self._player_doc is not None:
             step = 1.0 if fine else self.current_interval()
-            if self._seek_at is not None and time.monotonic() - self._seek_at[1] < 0.5:
-                pos = self._seek_at[0]
-            else:
-                pos = self.player.position()
-                if pos is None:
-                    pos = self.layer.scale.get_value()
-            self.preview_seek(max(0.0, min(dur, pos + n * step)))
+            self.preview_seek(max(0.0, min(dur, self._preview_pos() + n * step)))
         elif fine:
             self.preview_seek(max(0.0, min(dur, self._preview_key[1] + n)))
         else:
             self._preview_step(n)
+        if self._shift_drag is not None:   # con Mayús pulsada, el paso arrastra la selección hasta donde se llega
+            i = self._preview_tile_index()
+            if i is not None:
+                self._shift_apply(i)
+
+    def _preview_pos(self):
+        """Instante que se ve con el vídeo cargado: el último seek pedido mientras el reproductor aún no lo refleja
+        (medio segundo); si no, su posición; y si tampoco la da, la barra."""
+        if self._seek_at is not None and time.monotonic() - self._seek_at[1] < 0.5:
+            return self._seek_at[0]
+        pos = self.player.position()
+        return pos if pos is not None else self.layer.scale.get_value()
+
+    def _preview_tile_index(self):
+        """Índice de la tesela que se ve: la del fotograma o, con el vídeo cargado, la que contiene el instante actual."""
+        ts = self.sheet.ts
+        if self._preview_key is None or not ts:
+            return None
+        if self._player_doc is not None:
+            return max(0, min(len(ts) - 1, bisect.bisect_right(ts, self._preview_pos()) - 1))
+        return self._tile_index(self._preview_key[1])
 
     def _preview_wheel(self, event):
-        """Rueda sobre la vista ampliada: abajo avanza y arriba retrocede, igual que las flechas (Ctrl: ±1 s)."""
-        n = self._wheel_steps(event, "preview")
+        """Rueda sobre la vista ampliada: abajo avanza y arriba retrocede, igual que las flechas (Ctrl: ±1 s; con Mayús
+        pulsada, además arrastra la selección). Hay sistemas que convierten Mayús+rueda en scroll horizontal."""
+        shift = bool(event.state & Gdk.ModifierType.SHIFT_MASK)
+        n = self._wheel_steps(event, "preview", sideways=shift)
         if n:
             self._preview_nudge(-n, bool(event.state & Gdk.ModifierType.CONTROL_MASK))
         return True
+
+    def _shift_begin(self):
+        """Mayús en la vista ampliada: alterna la tesela que se ve (su tramo entra o sale de los segmentos, como un
+        clic en el mosaico) y deja abierto un arrastre: mientras siga pulsada, cada paso de rueda o flecha aplica lo
+        mismo a las teselas por las que pasa, como arrastrar con el ratón en el mosaico. Se cierra al soltarla."""
+        if self._shift_drag is not None:   # repetición automática de la tecla
+            return
+        i = self._preview_tile_index()
+        if i is None or self.current is None or self.current.info is None:
+            return
+        self._shift_drag = {"i0": i, "mode": self.sheet.ts[i] not in self.sheet.selected}
+        self.on_drag_begin()
+        self._shift_apply(i)
+
+    def _shift_apply(self, i):
+        d, ts = self._shift_drag, self.sheet.ts
+        lo, hi = min(d["i0"], i), max(d["i0"], i)
+        self.on_drag_apply(ts[lo:hi + 1], d["mode"])
+        self._refresh_mark()
+        if DEBUG:
+            log("mayús: %s %s..%s" % ("marcar" if d["mode"] else "desmarcar", fmt_time(ts[lo]), fmt_time(ts[hi])))
+
+    def _shift_end(self):
+        """Se suelta Mayús (o se cierra la vista, o la ventana pierde el foco): lo arrastrado queda hecho y guardado."""
+        if self._shift_drag is None:
+            return
+        self._shift_drag = None
+        self.on_drag_end()
+        self._refresh_mark()
 
     def _refresh_mark(self):
         """Recuadro rojo de la vista ampliada: en modo fotograma, si la tesela está marcada (como en el mosaico);
@@ -5017,13 +5067,7 @@ class ThumbSheet(Gtk.Window):
             return
         doc, t = self._preview_key
         if self._player_doc is not None:
-            if self._seek_at is not None and time.monotonic() - self._seek_at[1] < 0.5:
-                pos = self._seek_at[0]
-            else:
-                pos = self.player.position()
-                if pos is None:
-                    pos = self.layer.scale.get_value()
-            on = doc.selection.contains(pos)
+            on = doc.selection.contains(self._preview_pos())
         else:
             on = t in self.sheet.selected
         if self.layer.set_marked(on) and DEBUG:
@@ -5089,6 +5133,7 @@ class ThumbSheet(Gtk.Window):
         return False
 
     def hide_preview(self):
+        self._shift_end()
         self._preview_key = None
         self._stop_player()
         if self.layer.get_visible():
@@ -5790,6 +5835,9 @@ class ThumbSheet(Gtk.Window):
                 self.clear_selection()
             return True
         if self.layer.get_visible():
+            if event.keyval in (Gdk.KEY_Shift_L, Gdk.KEY_Shift_R):
+                self._shift_begin()   # marca/desmarca lo que se ve y abre el arrastre (hasta soltarla)
+                return True
             if event.keyval == Gdk.KEY_space:
                 self.toggle_play()
                 return True
@@ -5832,6 +5880,11 @@ class ThumbSheet(Gtk.Window):
             if self._cut is None and self.cut_btn.get_sensitive():
                 self.on_cut()
             return True
+        return False
+
+    def on_key_release(self, widget, event):
+        if event.keyval in (Gdk.KEY_Shift_L, Gdk.KEY_Shift_R):
+            self._shift_end()
         return False
 
     def on_drag_data(self, widget, context, x, y, data, info, time_):

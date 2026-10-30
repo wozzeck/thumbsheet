@@ -3,7 +3,7 @@
 # borran durante la prueba; los originales no se tocan), y con
 # xdotool recorre: rueda sobre el slider de intervalo, clic/arrastre/Shift+clic/doble clic de teselas, un corte que
 # falla a propósito (toast rojo, Esc lo cierra), Cortar sin pérdida, cambio de intervalo sin alterar segmentos, vista
-# ampliada (flechas y rueda, recuadro rojo, reproducción muda, seek ±intervalo y ±1 s con Ctrl), cambio de vídeo, centrado al cambiar columnas, Escape,
+# ampliada (flechas y rueda, recuadro rojo, Mayús marca/desmarca y arrastra, reproducción muda, seek ±intervalo y ±1 s con Ctrl), cambio de vídeo, centrado al cambiar columnas, Escape,
 # Cortar y borrar original (doble pulsación, desarme a los 5 s), Eliminar con confirmación, Ctrl+Q, y SIGKILL
 # en plena generación sin huérfanos. Capturas PNG en `out`.
 # Las expectativas se calculan a partir del intervalo (S) y las columnas (COLS) reales. El vídeo A debe
@@ -110,6 +110,12 @@ grep -q "marca: dentro de un segmento" "$OUT/app.log" && ok "traza del recuadro 
 shot 4c3-rueda-marcada 0.3
 xdotool click 4; sleep 0.9
 chk "una muesca arriba: tesela $((5*S0)) s, fuera → sin recuadro" "$(amp)" "ampliada: $(mmss $((5*S0))) (sin marcar)"
+# Mayús en la vista ampliada: alterna la tesela que se ve; con Mayús pulsada la rueda arrastra la selección (como en el mosaico)
+xdotool keydown shift; sleep 0.4; xdotool click 4; sleep 0.9; xdotool keyup shift; sleep 0.7   # 300 s se marca; rueda arriba → 240 s también
+chk "Mayús en $((5*S0)) s y rueda arriba con Mayús: $((4*S0))–$((6*S0)) se marca y se funde con el segmento" "$(sel)" "$(seg $((4*S0)) $B)"
+grep -q "mayús: marcar $(mmss $((4*S0)))..$(mmss $((5*S0)))" "$OUT/app.log" && ok "traza del arrastre con Mayús (marcar $(mmss $((4*S0)))..$(mmss $((5*S0))))" || ko "sin traza «mayús: marcar»: $(grep 'mayús' "$OUT/app.log" | tail -1)"
+xdotool keydown shift; sleep 0.4; xdotool click 5; sleep 0.9; xdotool keyup shift; sleep 0.7   # 240 s (marcada) se desmarca; rueda abajo → 300 s también
+chk "Mayús otra vez (desmarcar) y rueda abajo con Mayús: vuelve a quedar $A–$B" "$(sel)" "$E2"
 xdotool click 5; sleep 0.9
 P0=$((6*S0))
 xdotool key space; sleep 3; shot 4e-reproduciendo 0.2; xdotool key space; sleep 0.6
@@ -126,6 +132,10 @@ xdotool mousemove $((X+700)) $((Y+400)) click 5; sleep 0.8; SK3=$(lastseek)   # 
 near "$SK3" "$(python3 -c "print(float('$SK2')+$S0)")" && ok "rueda abajo sobre el vídeo: seek +$S0 s (a $SK3)" || ko "rueda abajo: seek '$SK3' (esperado $SK2+$S0)"
 xdotool keydown ctrl click 4 keyup ctrl; sleep 0.8; SK4=$(lastseek)   # Ctrl+rueda arriba: -1 s
 near "$SK4" "$(python3 -c "print(float('$SK3')-1)")" && ok "Ctrl+rueda arriba sobre el vídeo: seek -1 s (a $SK4)" || ko "Ctrl+rueda arriba: seek '$SK4' (esperado $SK3-1)"
+xdotool key shift; sleep 0.8   # Mayús con el vídeo en pausa en ~$SK4 s: el tramo de su tesela ($((8*S0))–$((9*S0))) sale de la selección
+chk "Mayús con el vídeo en $SK4 s: el tramo $((8*S0))–$((9*S0)) sale del segmento" "$(sel)" "$(seg $A $((8*S0)) $((9*S0)) $B)"
+xdotool key shift; sleep 0.8
+chk "Mayús otra vez: el tramo vuelve" "$(sel)" "$E2"
 NF=$(grep -c "marca: fuera" "$OUT/app.log" || true)
 xdotool key End; sleep 1.2
 [[ "$(grep -c "marca: fuera" "$OUT/app.log" || true)" -gt "$NF" ]] && ok "Fin (fuera del segmento): el recuadro se apaga" || ko "al saltar al final el recuadro no se apagó"

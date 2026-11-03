@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Humo de la GUI en un Xvfb propio (:66): Eliminar con segundos de gracia para cancelar. Tres COPIAS de A (uno, dos, tres).
 #  1. Supr + Intro sobre uno: se pasa a dos al momento, uno sale de la lista (fila escondida, recuento, panel) y abajo
-#     sale el aviso «Borrando uno en 10 s» con Cancelar; el fichero sigue en disco y queda apuntado en
+#     sale el aviso «Borrando uno en 20 s» con Cancelar; el fichero sigue en disco y queda apuntado en
 #     pending-delete.json. Cancelar: uno vuelve a la lista, el fichero sigue, el apunte desaparece, sin toast verde.
-#  2. Supr + Intro sobre dos: tres a la vista al momento; a los 3 s el fichero sigue; a los ~10 s se borra (fichero
+#  2. Supr + Intro sobre dos: tres a la vista al momento; a los 3 s el fichero sigue; a los ~20 s se borra (fichero
 #     fuera, toast verde, apunte fuera).
 #  3. Supr + Intro sobre tres y Ctrl+Q en seguida: diálogo «pendiente de borrar»; Esc vuelve (la app sigue, con su
 #     aviso); Ctrl+Q + Intro cierra y el borrado se hace igualmente (fichero y apunte fuera).
@@ -45,15 +45,15 @@ waitfor "geometry:" 20 || true; sleep 0.5
 
 # 1. Eliminar uno y cancelar desde el aviso
 xdotool key Delete; sleep 0.8; xdotool key Return; sleep 0.8
-grep -q "eliminar: programado uno.$EXT (en 10 s)" "$L" && ok "Supr + Intro: uno.$EXT programado para borrarse en 10 s" || ko "no se programó: $(grep 'eliminar' "$L" | tail -1)"
+grep -q "eliminar: programado uno.$EXT (en 20 s)" "$L" && ok "Supr + Intro: uno.$EXT programado para borrarse en 20 s" || ko "no se programó: $(grep 'eliminar' "$L" | tail -1)"
 [[ "$(shown)" == "dos.$EXT" ]] && ok "se pasa a dos.$EXT al momento" || ko "a la vista: '$(shown)'"
 waitfor "toast espera: cancelar=" 5 && ok "aviso abajo: $(last 'toast espera: Borrando')" || ko "sin aviso de borrado programado: $(grep 'toast' "$L" | tail -2 | tr '\n' ' ')"
-[[ "$(last 'toast espera: Borrando')" == "toast espera: Borrando uno.$EXT en 10 s" ]] && ok "el aviso dice qué se borra y cuánto queda" || ko "texto del aviso: '$(last 'toast espera: Borrando')'"
+[[ "$(last 'toast espera: Borrando')" == "toast espera: Borrando uno.$EXT en 20 s" ]] && ok "el aviso dice qué se borra y cuánto queda" || ko "texto del aviso: '$(last 'toast espera: Borrando')'"
 [[ "$(last '\] panel:')" == *"-uno.$EXT, dos.$EXT, tres.$EXT"* ]] && ok "panel: uno escondido (-) y los otros dos" || ko "panel: '$(last '\] panel:')'"
 [[ "$(last 'archivos:')" == "archivos: 2" ]] && ok "cabecera: 2 archivos" || ko "cabecera: '$(last 'archivos:')'"
 [[ "$(nrows)" == 2 ]] && ok "geometría: 2 filas a la vista" || ko "filas a la vista: $(nrows)"
 [[ -f "$PF" ]] && grep -q "uno.$EXT" "$PF" && ok "apuntado en pending-delete.json" || ko "sin apunte: $(cat "$PF" 2>/dev/null || echo 'no hay fichero')"
-sleep 2; [[ -f "$K1" ]] && ok "a los 3 s el fichero sigue en disco" || ko "¡borrado antes de los 10 s!"
+sleep 2; [[ -f "$K1" ]] && ok "a los 3 s el fichero sigue en disco" || ko "¡borrado antes de los 20 s!"
 shot 1-aviso-cancelar 0.2
 C=$(grep "toast espera: cancelar=" "$L" | tail -1 | sed 's/.*cancelar=//'); CX=${C%,*}; CY=${C#*,}
 xdotool mousemove $((X+CX)) $((Y+CY)) click 1; sleep 1
@@ -63,17 +63,17 @@ grep -q "eliminar: cancelado uno.$EXT (Cancelar en el aviso)" "$L" && ok "Cancel
 [[ "$(last 'archivos:')" == "archivos: 3" ]] && ok "cabecera: 3 archivos" || ko "cabecera tras cancelar: '$(last 'archivos:')'"
 sleep 0.5; [[ "$(nrows)" == 3 ]] && ok "geometría: 3 filas a la vista" || ko "filas tras cancelar: $(nrows)"
 [[ ! -f "$PF" ]] && ok "el apunte desaparece" || ko "pending-delete.json sigue: $(cat "$PF")"
-sleep 9; [[ -f "$K1" && "$(n 'toast ok: Eliminado')" == 0 && "$(n 'borrado: ')" == 0 ]] && ok "pasados 10 s más nada se borra (uno sigue, sin toast verde)" || ko "tras cancelar: uno $([[ -f "$K1" ]] && echo sigue || echo BORRADO) · $(grep 'toast ok\|borrado:' "$L" | tail -1)"
+sleep 19; [[ -f "$K1" && "$(n 'toast ok: Eliminado')" == 0 && "$(n 'borrado: ')" == 0 ]] && ok "pasado el plazo nada se borra (uno sigue, sin toast verde)" || ko "tras cancelar: uno $([[ -f "$K1" ]] && echo sigue || echo BORRADO) · $(grep 'toast ok\|borrado:' "$L" | tail -1)"
 [[ "$(shown)" == "dos.$EXT" ]] && ok "sigue dos.$EXT a la vista (cancelar no cambia de vídeo si hay uno)" || ko "a la vista tras cancelar: '$(shown)'"
 
 # 2. Eliminar dos y dejar que pase el tiempo
 xdotool key Delete; sleep 0.8; xdotool key Return; sleep 0.8
 grep -q "eliminar: programado dos.$EXT" "$L" && [[ "$(shown)" == "tres.$EXT" ]] && ok "Supr + Intro sobre dos: programado y tres.$EXT a la vista al momento" || ko "dos: $(grep 'eliminar' "$L" | tail -1) · a la vista '$(shown)'"
 sleep 2.2; [[ -f "$K2" ]] && ok "a los 3 s dos sigue en disco" || ko "dos borrado antes de tiempo"
-[[ "$(last 'toast espera: Borrando')" == "toast espera: Borrando dos.$EXT en 10 s" ]] && ok "aviso para dos" || ko "aviso: '$(last 'toast espera: Borrando')'"
-waitfor "borrado: dos.$EXT" 20 && ok "a los 10 s se borra en segundo plano" || ko "no se borró dos: $(grep 'borr\|elimin' "$L" | tail -2 | tr '\n' ' ')"
+[[ "$(last 'toast espera: Borrando')" == "toast espera: Borrando dos.$EXT en 20 s" ]] && ok "aviso para dos" || ko "aviso: '$(last 'toast espera: Borrando')'"
+waitfor "borrado: dos.$EXT" 30 && ok "a los 20 s se borra en segundo plano" || ko "no se borró dos: $(grep 'borr\|elimin' "$L" | tail -2 | tr '\n' ' ')"
 T0=$(secs "$(stamp "eliminar: programado dos.$EXT")"); T1=$(secs "$(stamp "borrado: dos.$EXT")"); DT=$((T1-T0))
-[[ "$DT" -ge 9 && "$DT" -le 14 ]] && ok "entre programar y borrar pasaron $DT s" || ko "entre programar y borrar pasaron $DT s"
+[[ "$DT" -ge 19 && "$DT" -le 24 ]] && ok "entre programar y borrar pasaron $DT s" || ko "entre programar y borrar pasaron $DT s"
 sleep 1; [[ ! -f "$K2" ]] && ok "dos.$EXT ya no está en disco" || ko "dos.$EXT sigue en disco"
 waitfor "toast ok: Eliminado: dos.$EXT" 5 && ok "toast verde al terminar" || ko "sin toast verde: $(grep 'toast' "$L" | tail -1)"
 [[ ! -f "$PF" ]] && ok "apunte retirado al terminar" || ko "pending-delete.json sigue: $(cat "$PF")"

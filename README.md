@@ -144,9 +144,9 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   con la selección y sobrevive a los retoques de los tramos.
 - **Eliminar** (también la tecla `Supr`): borra el archivo de vídeo del disco directamente, sin papelera,
   tras confirmar (Intro acepta, Esc cancela). Al confirmar, el vídeo sale de la lista al momento y se pasa al
-  siguiente, pero el disco no se toca hasta pasados 10 s: abajo queda un aviso «Borrando x en 9 s» con
+  siguiente, pero el disco no se toca hasta pasados 20 s: abajo queda un aviso «Borrando x en 19 s» con
   **Cancelar**, que lo devuelve a la lista como si nada (si hay varios programados, los anula todos). Así una
-  segunda pulsación de Eliminar, por impaciencia, nunca cae sobre el que acababa de marcarse. Pasados los 10 s
+  segunda pulsación de Eliminar, por impaciencia, nunca cae sobre el que acababa de marcarse. Pasados los 20 s
   el borrado (el fichero y su caché de miniaturas, que pueden ser miles) va en segundo plano: antes espera a que
   terminen los ffmpeg que tuvieran el vídeo abierto y reintenta unos segundos si el sistema contesta «ocupado» o
   «permiso denegado» (en una carpeta remota, sftp por gvfs o sshfs, borrar un fichero abierto falla a veces por
@@ -270,7 +270,7 @@ inicialización de VAAPI), por eso sólo se usa en el modo tramos.
 | `THUMBSHEET_THUMB_PX=320` | lado mayor de la miniatura guardada (por defecto 480; cambia la huella de caché) |
 | `THUMBSHEET_SWITCH=0.005` | intervalo de cesión del GIL entre hilos en segundos (por defecto 0.002) |
 | `THUMBSHEET_PIX_MB=32` | presupuesto de la caché de miniaturas decodificadas en memoria |
-| `THUMBSHEET_DELETE_DELAY=3` | segundos entre confirmar Eliminar y el borrado real (por defecto 10) |
+| `THUMBSHEET_DELETE_DELAY=3` | segundos entre confirmar Eliminar y el borrado real (por defecto 20) |
 | `THUMBSHEET_DEBUG=1` | traza en stderr: plan elegido, GPU, tiempos |
 
 Ajustes (intervalo, tamaño, ventana) se guardan en `~/.config/thumbsheet/settings.json`.

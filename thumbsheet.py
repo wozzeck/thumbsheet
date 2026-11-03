@@ -66,7 +66,7 @@ CUT_DEL_LABEL = "Cortar y _borrar original"
 CUT_DEL_ARM_MS = 5000                    # tras la primera pulsación, el botón se desarma si no se confirma a tiempo
 COLS_MIN, COLS_MAX, COLS_DEF = 3, 20, 6                     # teselas por fila
 PIX_BUDGET = int(os.environ.get("THUMBSHEET_PIX_MB", "64")) * 1024 * 1024
-DELETE_DELAY = float(os.environ.get("THUMBSHEET_DELETE_DELAY", "10"))   # s entre Eliminar y el borrado real (aviso con Cancelar)
+DELETE_DELAY = float(os.environ.get("THUMBSHEET_DELETE_DELAY", "20"))   # s entre Eliminar y el borrado real (aviso con Cancelar)
 PENDING_FILE = CONFIG_FILE.parent / "pending-delete.json"               # borrados programados que aún no se han hecho
 DEBUG = os.environ.get("THUMBSHEET_DEBUG") == "1"
 

@@ -70,7 +70,7 @@ xdotool mousemove $((X+EX-120)) $((Y+EY)) click 1; sleep 0.6
 # 4. borrar a2 (último a la vista de la raíz): se pasa a b1.mkv, saltando el oculto y la fila sub
 click_row 2; sleep 0.3
 xdotool key Delete; sleep 0.8; xdotool key Return
-waitfor "eliminado: a2.mp4" 40 && ok "Supr + Intro: a2.mp4 borrado" || ko "no se borró a2: $(grep 'eliminar\|eliminando\|eliminado' "$L" | tail -2 | tr '\n' ' ')"
+waitfor "eliminado: a2.mp4" 120 && ok "Supr + Intro: a2.mp4 borrado (a los 20 s de gracia)" || ko "no se borró a2: $(grep 'eliminar\|eliminando\|eliminado' "$L" | tail -2 | tr '\n' ' ')"
 sleep 0.5
 [[ "$(last 'vídeo:')" == "vídeo: b1.mkv"* ]] && ok "tras borrar a2: a la vista b1.mkv" || ko "tras borrar: $(last 'vídeo:')"
 P=$(last "panel:")

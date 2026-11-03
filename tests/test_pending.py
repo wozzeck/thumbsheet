@@ -54,7 +54,7 @@ try:
     d.doomed = True
     check(not T.ThumbSheet._usable(d), "a la espera de borrarse (doomed): no se pasa a él")
     check(T.Document(tmp / "v" / "x.mp4").doomed is False, "Document nace sin borrado programado")
-    check(T.DELETE_DELAY == 10.0, "10 s de gracia por defecto (THUMBSHEET_DELETE_DELAY): %s" % T.DELETE_DELAY)
+    check(T.DELETE_DELAY == 20.0, "20 s de gracia por defecto (THUMBSHEET_DELETE_DELAY): %s" % T.DELETE_DELAY)
 finally:
     shutil.rmtree(str(tmp), ignore_errors=True)
 print("TODO OK" if not fails else "HAY FALLOS: %d" % fails)

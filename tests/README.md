@@ -66,11 +66,11 @@
   con uno abre el diálogo de corte, `Esc` lo cierra sin tocar nada y `C` + `Intro` corta y borra el original (en
   modo exacto, elegido con la flecha abajo, para que un segundo `Intro` llegue con el corte en marcha y se compruebe
   que no lo cancela); `Ctrl+C` no abre el diálogo; `Supr` abre Eliminar, `Esc` no borra y `Supr` + `Intro` borra
-  (pasados los 10 s de gracia).
+  (pasados los 20 s de gracia).
 - `gui_delete.sh <vídeo A corto> [out]` — Xvfb propio (`:66`), tres copias de A. Eliminar con gracia para cancelar:
   `Supr` + `Intro` pasa al siguiente al momento, el vídeo sale de la lista (fila, recuento, panel) y abajo queda el
-  aviso «Borrando x en 10 s» con Cancelar, el fichero sigue en disco y queda apuntado en `pending-delete.json`;
-  Cancelar lo devuelve a la lista y retira el apunte, sin borrar nada después; sin cancelar, a los 10 s se borra en
+  aviso «Borrando x en 20 s» con Cancelar, el fichero sigue en disco y queda apuntado en `pending-delete.json`;
+  Cancelar lo devuelve a la lista y retira el apunte, sin borrar nada después; sin cancelar, a los 20 s se borra en
   segundo plano (toast verde, apunte fuera); `Ctrl+Q` con un borrado programado pregunta (Esc vuelve con el aviso
   intacto, Intro cierra y lo borra igualmente); al arrancar con un apunte pendiente se borran fichero y caché, el
   vídeo no se carga aunque venga en los argumentos y `Ctrl+Q` cierra sin preguntar.
@@ -97,6 +97,6 @@
   Mayús para marcar/desmarcar y arrastrar con la rueda, reproducción muda, seek ±intervalo y ±1 s con Ctrl), un corte que falla a
   propósito (toast rojo; Esc lo cierra), Cortar, cambio de vídeo, Escape, Cortar y borrar original
   (doble pulsación: comprueba que una sola o una tardía no borran), Eliminar con confirmación (sale de la lista al
-  momento y se borra a los 10 s, con aviso para cancelar), Ctrl+Q, y
+  momento y se borra a los 20 s, con aviso para cancelar), Ctrl+Q, y
   SIGKILL en plena generación. Deja capturas PNG en `out`. Requiere `Xvfb`,
   `xdotool`, `import` (ImageMagick). Caché y ajustes van aislados en `out`.

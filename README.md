@@ -143,15 +143,21 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   fuera lo deja como estaba. × quita el tramo; clic lleva el mosaico a ese instante. El orden se guarda
   con la selección y sobrevive a los retoques de los tramos.
 - **Eliminar** (también la tecla `Supr`): borra el archivo de vídeo del disco directamente, sin papelera,
-  tras confirmar (Intro acepta, Esc cancela). Antes de borrar espera a que terminen los ffmpeg que tuvieran el vídeo abierto y
-  reintenta unos segundos si el sistema contesta «ocupado» o «permiso denegado»: en una carpeta remota
-  (sftp por gvfs, sshfs) borrar un fichero abierto falla a veces por eso. El borrado
-  (el fichero y su caché de miniaturas, que pueden ser miles) va en segundo plano: el diálogo se cierra al
-  momento, la fila queda como "Eliminando…" y se pasa al siguiente vídeo; al terminar sale el toast y la
-  fila desaparece.
+  tras confirmar (Intro acepta, Esc cancela). Al confirmar, el vídeo sale de la lista al momento y se pasa al
+  siguiente, pero el disco no se toca hasta pasados 10 s: abajo queda un aviso «Borrando x en 9 s» con
+  **Cancelar**, que lo devuelve a la lista como si nada (si hay varios programados, los anula todos). Así una
+  segunda pulsación de Eliminar, por impaciencia, nunca cae sobre el que acababa de marcarse. Pasados los 10 s
+  el borrado (el fichero y su caché de miniaturas, que pueden ser miles) va en segundo plano: antes espera a que
+  terminen los ffmpeg que tuvieran el vídeo abierto y reintenta unos segundos si el sistema contesta «ocupado» o
+  «permiso denegado» (en una carpeta remota, sftp por gvfs o sshfs, borrar un fichero abierto falla a veces por
+  eso); al terminar sale el toast verde. Si cierras la app con borrados programados, avisa y pide confirmación:
+  **Cerrar y borrar** (Intro) los hace ya, en segundo plano, sin esperar; **Volver** (Esc) deja la app abierta con
+  su aviso. Lo programado queda apuntado en `~/.config/thumbsheet/pending-delete.json`: si la app muere antes de
+  borrarlo, se borra al volver a abrirla (y ese vídeo no se carga aunque esté en lo que abras).
 - **Avisos**: Cortar y Eliminar informan con un *toast* sobre el mosaico. Verde si ha ido bien,
   desaparece a los 3 s. Rojo si hubo un error: se queda hasta que lo cierres (`×` o `Esc`), con el texto
-  seleccionable y un botón Copiar para pegar el mensaje donde haga falta.
+  seleccionable y un botón Copiar para pegar el mensaje donde haga falta. Ámbar, justo encima, el de los
+  borrados programados, con su cuenta atrás y Cancelar.
 
 La caché va por segundo, así que las capturas coincidentes entre intervalos se reutilizan: pasar de
 30 s a 1 min no genera nada, y de 30 s a 10 s sólo genera los dos tercios que faltan. Lo ya generado no
@@ -264,6 +270,7 @@ inicialización de VAAPI), por eso sólo se usa en el modo tramos.
 | `THUMBSHEET_THUMB_PX=320` | lado mayor de la miniatura guardada (por defecto 480; cambia la huella de caché) |
 | `THUMBSHEET_SWITCH=0.005` | intervalo de cesión del GIL entre hilos en segundos (por defecto 0.002) |
 | `THUMBSHEET_PIX_MB=32` | presupuesto de la caché de miniaturas decodificadas en memoria |
+| `THUMBSHEET_DELETE_DELAY=3` | segundos entre confirmar Eliminar y el borrado real (por defecto 10) |
 | `THUMBSHEET_DEBUG=1` | traza en stderr: plan elegido, GPU, tiempos |
 
 Ajustes (intervalo, tamaño, ventana) se guardan en `~/.config/thumbsheet/settings.json`.

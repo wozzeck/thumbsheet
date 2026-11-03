@@ -23,6 +23,9 @@
   (`on_aspect`) y que quedan apuntadas en `aspects.json`.
 - `test_delete.py <vídeo>` — sin ventana: `remove_with_retry` reintenta ante «ocupado» y `Generator.quiesce`
   deja sin ffmpeg vivos a un vídeo cancelado antes de borrarlo (carpetas remotas: sftp por gvfs, sshfs).
+- `test_pending.py` — sin ventana, instantáneo: el registro en disco de los borrados programados por Eliminar
+  (`PendingDeletes`, `pending-delete.json` junto a la configuración): añadir sin repetir, quitar, releer, fichero
+  ausente o corrupto, sin entradas no queda fichero; y un vídeo a la espera de borrarse no es un vecino al que pasar.
 - `test_errors.py <vídeo mp4 faststart>` — sin ventana. Vídeos irreproducibles: un fichero de texto con
   extensión .mp4 (mensaje de una línea), `ensure_info` que no deja escapar excepciones, una copia con los
   datos a ceros (ffprobe la acepta; el generador desiste en segundos sin dejar marcas, en seek y en tramos,
@@ -62,7 +65,15 @@
   acerca, abajo aleja) y no el tamaño, la rueda sola no cambia ninguno. Teclas: `C` sin segmentos no abre nada;
   con uno abre el diálogo de corte, `Esc` lo cierra sin tocar nada y `C` + `Intro` corta y borra el original (en
   modo exacto, elegido con la flecha abajo, para que un segundo `Intro` llegue con el corte en marcha y se compruebe
-  que no lo cancela); `Ctrl+C` no abre el diálogo; `Supr` abre Eliminar, `Esc` no borra y `Supr` + `Intro` borra.
+  que no lo cancela); `Ctrl+C` no abre el diálogo; `Supr` abre Eliminar, `Esc` no borra y `Supr` + `Intro` borra
+  (pasados los 10 s de gracia).
+- `gui_delete.sh <vídeo A corto> [out]` — Xvfb propio (`:66`), tres copias de A. Eliminar con gracia para cancelar:
+  `Supr` + `Intro` pasa al siguiente al momento, el vídeo sale de la lista (fila, recuento, panel) y abajo queda el
+  aviso «Borrando x en 10 s» con Cancelar, el fichero sigue en disco y queda apuntado en `pending-delete.json`;
+  Cancelar lo devuelve a la lista y retira el apunte, sin borrar nada después; sin cancelar, a los 10 s se borra en
+  segundo plano (toast verde, apunte fuera); `Ctrl+Q` con un borrado programado pregunta (Esc vuelve con el aviso
+  intacto, Intro cierra y lo borra igualmente); al arrancar con un apunte pendiente se borran fichero y caché, el
+  vídeo no se carga aunque venga en los argumentos y `Ctrl+Q` cierra sin preguntar.
 - `gui_snap.sh <vídeo A de unos minutos> [out]` — Xvfb propio (`:69`), una copia de A a 10 s. La barra ya no tiene LLC
   y sí el toggle; sin snap la rueda va por píxeles; al activarlo salta a la fila entera más cercana y gana el relleno
   final (menos de una fila); con snap, la rueda y el arrastre de la barra de scroll sólo se paran en filas enteras,
@@ -85,6 +96,7 @@
   teselas (marca roja en la barra de scroll), vista ampliada (flechas y rueda, recuadro rojo al entrar y salir de un segmento,
   Mayús para marcar/desmarcar y arrastrar con la rueda, reproducción muda, seek ±intervalo y ±1 s con Ctrl), un corte que falla a
   propósito (toast rojo; Esc lo cierra), Cortar, cambio de vídeo, Escape, Cortar y borrar original
-  (doble pulsación: comprueba que una sola o una tardía no borran), Eliminar con confirmación, Ctrl+Q, y
+  (doble pulsación: comprueba que una sola o una tardía no borran), Eliminar con confirmación (sale de la lista al
+  momento y se borra a los 10 s, con aviso para cancelar), Ctrl+Q, y
   SIGKILL en plena generación. Deja capturas PNG en `out`. Requiere `Xvfb`,
   `xdotool`, `import` (ImageMagick). Caché y ajustes van aislados en `out`.

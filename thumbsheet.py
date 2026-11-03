@@ -66,6 +66,8 @@ CUT_DEL_LABEL = "Cortar y _borrar original"
 CUT_DEL_ARM_MS = 5000                    # tras la primera pulsación, el botón se desarma si no se confirma a tiempo
 COLS_MIN, COLS_MAX, COLS_DEF = 3, 20, 6                     # teselas por fila
 PIX_BUDGET = int(os.environ.get("THUMBSHEET_PIX_MB", "64")) * 1024 * 1024
+DELETE_DELAY = float(os.environ.get("THUMBSHEET_DELETE_DELAY", "10"))   # s entre Eliminar y el borrado real (aviso con Cancelar)
+PENDING_FILE = CONFIG_FILE.parent / "pending-delete.json"               # borrados programados que aún no se han hecho
 DEBUG = os.environ.get("THUMBSHEET_DEBUG") == "1"
 
 VIDEO_EXT = (".mp4", ".mkv", ".webm", ".mov", ".avi", ".m4v", ".mpg", ".mpeg", ".ts", ".m2ts",
@@ -2754,6 +2756,36 @@ class Toast(Gtk.Revealer):
         Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(self.label.get_text(), -1)
 
 
+class WaitToast(Gtk.Revealer):
+    """Aviso abajo, encima del toast de resultado, de los borrados programados por Eliminar («Borrando x en 9 s»), con
+    el botón Cancelar, que los anula todos. El texto (con la cuenta atrás) lo pone la ventana."""
+
+    def __init__(self, on_cancel):
+        super(WaitToast, self).__init__()
+        self.set_transition_type(Gtk.RevealerTransitionType.SLIDE_UP)
+        self.set_transition_duration(180)
+        self.set_halign(Gtk.Align.CENTER)
+        self.set_valign(Gtk.Align.END)
+        self.set_margin_bottom(84)   # por encima del toast de resultado, que puede salir a la vez («Eliminado: …»)
+        self.box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.box.get_style_context().add_class("ts-toast")
+        self.box.get_style_context().add_class("ts-toast-wait")
+        self.label = Gtk.Label(label="")
+        self.label.set_line_wrap(True)
+        self.label.set_max_width_chars(90)
+        self.label.set_xalign(0.0)
+        self.box.pack_start(self.label, True, True, 0)
+        self.cancel_btn = Gtk.Button(label="Cancelar")
+        self.cancel_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self.cancel_btn.set_tooltip_text("No borrar: los vídeos vuelven a la lista")
+        self.cancel_btn.connect("clicked", lambda *_: on_cancel())
+        self.box.pack_start(self.cancel_btn, False, False, 0)
+        self.add(self.box)
+        self.box.show_all()
+        self.set_reveal_child(False)
+        self.show()
+
+
 # ----------------------------------------------------------------------------------------------
 # selección → segmentos → proyecto de LosslessCut
 # ----------------------------------------------------------------------------------------------
@@ -3536,6 +3568,7 @@ class Document(object):
         self.row = None
         self.folder = None                    # carpeta del panel (raíz o subcarpeta) bajo la que está su fila
         self.hidden = False                   # oculto por el ojo de su carpeta (ya cortado): ni a la vista ni en 2.º plano
+        self.doomed = False                   # Eliminar confirmado, a la espera de los segundos para cancelar: fila escondida
         self.lock = threading.Lock()
 
     def ensure_info(self):
@@ -3651,6 +3684,52 @@ def save_settings(d):
         pass
 
 
+class PendingDeletes(object):
+    """Borrados programados por Eliminar (quedan unos segundos para cancelar) que aún no se han completado, apuntados
+    en disco: si la app se cierra o muere con alguno sin disparar o a medias, la siguiente ejecución lo termina. Cada
+    entrada lleva la ruta del vídeo y la de su caché de miniaturas. Sin entradas no hay fichero."""
+
+    def __init__(self, path):
+        self.path = pathlib.Path(path)
+        self.lock = threading.Lock()
+
+    def load(self):
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return [x for x in data if isinstance(x, dict) and x.get("path")]
+        except (OSError, ValueError, TypeError):
+            return []
+
+    def _save(self, items):
+        try:
+            if not items:
+                if self.path.exists():
+                    self.path.unlink()
+                return
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            tmp.write_text(json.dumps(items, indent=1), encoding="utf-8")
+            os.replace(str(tmp), str(self.path))
+        except OSError as e:
+            log("pendientes: no se pudo guardar %s: %s" % (self.path, e))
+
+    def add(self, video, cache_dir):
+        with self.lock:
+            items = [x for x in self.load() if x["path"] != str(video)]
+            items.append({"path": str(video), "cache": str(cache_dir) if cache_dir else None})
+            self._save(items)
+
+    def remove(self, video):
+        with self.lock:
+            items = self.load()
+            keep = [x for x in items if x["path"] != str(video)]
+            if len(keep) != len(items):
+                self._save(keep)
+
+
+PENDING = PendingDeletes(PENDING_FILE)
+
+
 def human_size(n):
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if n < 1024 or unit == "TB":
@@ -3670,6 +3749,9 @@ class ThumbSheet(Gtk.Window):
         self._by_path = {}                    # ruta → Document: no repetir, y la vigilancia sabe qué hay cargado
         self.roots = []                       # carpetas raíz del panel (Folder), por orden de llegada
         self._own_outputs = set()             # lo que escribe esta app (-cortado): la vigilancia no lo carga
+        self._pending = collections.OrderedDict()   # Eliminar confirmado → (temporizador, instante límite) hasta el borrado
+        self._wait_tick = None                # cuenta atrás del aviso de borrados programados
+        self._skip_paths = set()              # pendientes de borrar de la sesión anterior: no se cargan
         self._geom_id = None                  # DEBUG: geometría pendiente de registrar
         self._scanning = 0                    # carpetas recorriéndose en segundo plano
         self._probing = None                  # documento que el hilo de sondeo está analizando ahora (ffprobe)
@@ -3756,7 +3838,8 @@ class ThumbSheet(Gtk.Window):
         # derecha: [contador] [Cortar] [Full] [Eliminar] [Segmentos]
         self.del_btn = Gtk.Button(label="Eliminar")
         self.del_btn.get_style_context().add_class("destructive-action")
-        self.del_btn.set_tooltip_text("Borrar el archivo de vídeo del disco (sin papelera), tras confirmar (Supr; Intro confirma)")
+        self.del_btn.set_tooltip_text("Borrar el archivo de vídeo del disco (sin papelera), tras confirmar (Supr; Intro confirma). "
+                                      "Se borra a los %d s; mientras, un aviso permite cancelar" % int(round(DELETE_DELAY)))
         self.del_btn.connect("clicked", self.on_delete)
         self.seg_btn = Gtk.ToggleButton(label="Segmentos")
         self.seg_btn.set_tooltip_text("Panel de segmentos: los tramos seleccionados en su orden de corte (arrastra para "
@@ -3812,6 +3895,8 @@ class ThumbSheet(Gtk.Window):
         self.overlay.add_overlay(self.layer)
         self.toast = Toast()
         self.overlay.add_overlay(self.toast)
+        self.wait = WaitToast(self._cancel_pending)
+        self.overlay.add_overlay(self.wait)
         self._preview_key = None
         self.player = None
         self._player_doc = None
@@ -3892,6 +3977,7 @@ class ThumbSheet(Gtk.Window):
         self.connect("key-release-event", self.on_key_release)
         self.connect("focus-out-event", lambda *_: (self._shift_end(unmark=False), False)[1])   # Mayús soltada fuera
         self.connect("destroy", self.on_destroy)
+        self.connect("delete-event", self.on_delete_event)
         self.connect("window-state-event", self.on_window_state)
         self._maximized = bool(self.settings.get("maximized"))
         # arrastrar y soltar vídeos sobre la ventana
@@ -3905,6 +3991,7 @@ class ThumbSheet(Gtk.Window):
 
         self.show_all()
         self._load_current()
+        self._resume_pending()   # antes del alta: lo que quedó por borrar no se carga
         self.add_paths(video_paths)
         self._gst_warm = False
         GLib.timeout_add(2500, self._warm_gst)   # con la ventana ya en marcha, precargar el reproductor aparte
@@ -3944,7 +4031,7 @@ class ThumbSheet(Gtk.Window):
             a = w.get_allocation()
             return "%d,%d" % (x + a.width // 2, y + a.height // 2)
         sx, sy = origin(self.sheet)
-        rows = ";".join(center(d.row) for d in self.docs if d.row is not None and not d.hidden)
+        rows = ";".join(center(d.row) for d in self.docs if d.row is not None and not d.hidden and not d.doomed)
         first = self.roots[0] if self.roots else None   # ojo y vigilancia de la primera carpeta raíz
         vb = self.scroller.get_vscrollbar()
         bx, by = origin(vb)
@@ -3969,9 +4056,10 @@ class ThumbSheet(Gtk.Window):
         return False
 
     def _log_panel(self):
-        """DEBUG: el árbol del panel en una línea («raíz: a, b | sub: c»; ~ delante de lo oculto)."""
+        """DEBUG: el árbol del panel en una línea («raíz: a, b | sub: c»; ~ delante de lo oculto, - de lo que espera a
+        borrarse)."""
         def names(f):
-            return ", ".join(("~" if d.hidden else "") + d.path.name for d in f.docs)
+            return ", ".join(("~" if d.hidden else "-" if d.doomed else "") + d.path.name for d in f.docs)
         parts = []
         for r in self.roots:
             parts.append("%s: %s" % (r.name, names(r)))
@@ -3993,6 +4081,9 @@ class ThumbSheet(Gtk.Window):
                 continue
             if rp.is_dir():
                 dirs.append(rp)
+                continue
+            if rp in self._skip_paths:
+                log("pendiente: no se carga %s (queda por borrar)" % rp.name)
                 continue
             if not rp.is_file() or rp in self._by_path:
                 continue
@@ -4119,8 +4210,9 @@ class ThumbSheet(Gtk.Window):
         threading.Thread(target=work, name="ts-scan", daemon=True).start()
 
     def _update_count(self):
-        n = len(self.docs)
-        hidden = sum(1 for d in self.docs if d.hidden)
+        docs = [d for d in self.docs if not d.doomed]   # los que esperan a borrarse ya no están en la lista
+        n = len(docs)
+        hidden = sum(1 for d in docs if d.hidden)
         text = "Sin archivos" if n == 0 else "1 archivo" if n == 1 else "%d archivos" % n
         if hidden:
             text += " · %d oculto%s" % (hidden, "" if hidden == 1 else "s")
@@ -4209,8 +4301,9 @@ class ThumbSheet(Gtk.Window):
 
     def _folder_tips(self, root):
         """Recuento y tooltips de la fila de una raíz según su estado, y el icono del ojo (abierto o tachado)."""
-        n = sum(1 for _ in root.all_docs())
-        hidden = sum(1 for d in root.all_docs() if d.hidden)
+        docs = [d for d in root.all_docs() if not d.doomed]   # los que esperan a borrarse ya no cuentan
+        n = len(docs)
+        hidden = sum(1 for d in docs if d.hidden)
         root.count_label.set_markup(sub_markup(("%d vídeo%s" % (n, "" if n == 1 else "s")) +
                                                ((" · %d oculto%s" % (hidden, "" if hidden == 1 else "s")) if hidden else "")))
         img = root.eye_btn.get_child()
@@ -4241,7 +4334,7 @@ class ThumbSheet(Gtk.Window):
             shown = shown or not h
         for s in root.subs:
             if s.row is not None:
-                s.row.set_visible(any(not d.hidden for d in s.docs))
+                s.row.set_visible(any(not d.hidden and not d.doomed for d in s.docs))
         self._folder_tips(root)
         cur = self.current
         if cur is not None and cur.hidden:
@@ -4287,8 +4380,8 @@ class ThumbSheet(Gtk.Window):
 
     @staticmethod
     def _usable(d):
-        """Vídeo al que se puede pasar: con fila, a la vista y sin borrarse."""
-        return d.row is not None and not d.hidden and not d.deleting
+        """Vídeo al que se puede pasar: con fila, a la vista y sin borrarse (ni esperando a ello)."""
+        return d.row is not None and not d.hidden and not d.deleting and not d.doomed
 
     def _on_move_cursor(self, box, step, count):
         """Flechas e Inicio/Fin en el panel: de vídeo a la vista en vídeo a la vista, saltando de un solo paso las filas
@@ -4603,7 +4696,8 @@ class ThumbSheet(Gtk.Window):
         i0 = self.docs.index(start) + 1 if start in self.docs else 0
         for k in range(len(self.docs)):
             doc = self.docs[(i0 + k) % len(self.docs)]
-            if doc is self.current or doc.info is None or doc.bg_tried == S or doc.deleting or doc.gen_error or doc.hidden:
+            if doc is self.current or doc.info is None or doc.bg_tried == S or doc.deleting or doc.doomed or doc.gen_error \
+                    or doc.hidden:
                 continue   # gen_error: no da fotogramas; no se insiste hasta que se abra ese vídeo. hidden: ya cortado
             doc.bg_tried = S
             if doc_complete(doc, S):
@@ -4698,7 +4792,7 @@ class ThumbSheet(Gtk.Window):
             if d.row.state.set_error(text) and DEBUG:
                 log("estado: %s → %s" % (d.path.name, d.row.state.state_name()))
         docs = [d for d in self.docs if d.row is not None and d.info is not None and d is not gen_doc and not d.gen_error
-                and not d.hidden]   # ocultos: sin icono a la vista, sin listdir
+                and not d.hidden and not d.doomed]   # ocultos o a la espera de borrarse: sin icono a la vista, sin listdir
         if not docs:
             return
         if self._coverage_busy:
@@ -5539,7 +5633,7 @@ class ThumbSheet(Gtk.Window):
     # ---- eliminar -------------------------------------------------------------------------------
     def on_delete(self, *_):
         doc = self.current
-        if doc is None or doc.deleting or self._cut is not None:
+        if doc is None or doc.deleting or doc.doomed or self._cut is not None:
             return
         try:
             size = human_size(doc.path.stat().st_size)
@@ -5561,7 +5655,194 @@ class ThumbSheet(Gtk.Window):
         if resp != Gtk.ResponseType.ACCEPT:
             log("eliminar: cancelado")
             return
+        self._schedule_delete(doc)
+
+    def _schedule_delete(self, doc):
+        """Eliminar confirmado: el vídeo sale ya de la lista (se pasa al siguiente) y queda programado para borrarse
+        a los DELETE_DELAY s, con un aviso abajo y Cancelar. Hasta entonces no se toca el disco: una segunda pulsación
+        de Eliminar nunca cae sobre el que acaba de marcarse (ya no está a la vista) y un arrepentimiento lo devuelve
+        a la lista. Queda apuntado en disco (PENDING): si la app se cierra o muere antes, la siguiente ejecución lo
+        borra."""
+        if doc.deleting or doc.doomed:
+            return
+        doc.doomed = True
+        PENDING.add(doc.path, doc.cache_dir)
+        log("eliminar: programado %s (en %d s)" % (doc.path.name, int(round(DELETE_DELAY))))
+        if doc is self.current:
+            self.hide_preview()
+        if self.generator is not None and self.gen_doc is doc:
+            self._cancel_generator()
+        if doc.row is not None:
+            doc.row.set_visible(False)
+        if doc is self.current:
+            self._show_neighbor(doc)
+        if doc.folder is not None:
+            self._refresh_folder(doc.folder.root or doc.folder)   # una subcarpeta que se queda sin nada se esconde
+        self._update_count()
+        self._pending[doc] = (GLib.timeout_add(int(DELETE_DELAY * 1000), self._fire_delete, doc),
+                              time.monotonic() + DELETE_DELAY)
+        self._refresh_wait(log_it=True)
+        self._update_buttons()
+        if DEBUG:
+            self._log_panel()
+        self._geometry_soon()
+        GLib.idle_add(self._start_next_background)
+
+    def _fire_delete(self, doc):
+        """Pasados los segundos de gracia sin cancelar: el borrado de verdad, en segundo plano."""
+        if self._pending.pop(doc, None) is None:
+            return False
+        doc.doomed = False
+        self._refresh_wait(log_it=True)
         self._delete_file(doc)
+        return False
+
+    def _cancel_pending(self, *_):
+        """Cancelar del aviso: ningún borrado programado se hace; los vídeos vuelven a la lista donde estaban."""
+        docs = list(self._pending)
+        if not docs:
+            return
+        for doc in docs:
+            entry = self._pending.pop(doc, None)
+            if entry is None:
+                continue
+            GLib.source_remove(entry[0])
+            doc.doomed = False
+            PENDING.remove(doc.path)
+            log("eliminar: cancelado %s (Cancelar en el aviso)" % doc.path.name)
+            if doc.row is not None:
+                doc.row.set_visible(not doc.hidden)
+            if doc.folder is not None:
+                self._refresh_folder(doc.folder.root or doc.folder)
+        self._update_count()
+        self._refresh_wait(log_it=True)
+        self._refresh_row_states()
+        if self.current is None:
+            first = next((d for d in docs if self._usable(d)), None)
+            if first is not None:
+                self.listbox.select_row(first.row)
+        self._update_buttons()
+        if DEBUG:
+            self._log_panel()
+        self._geometry_soon()
+        GLib.idle_add(self._start_next_background)
+
+    def _refresh_wait(self, log_it=False):
+        """Texto del aviso de borrados programados (cuenta atrás por vídeo) y su temporizador de un segundo."""
+        if not self._pending:
+            self.wait.set_reveal_child(False)
+            if self._wait_tick is not None:
+                GLib.source_remove(self._wait_tick)
+                self._wait_tick = None
+            if log_it:
+                log("toast espera: ninguno")
+            return
+        now = time.monotonic()
+        parts = ["%s en %d s" % (d.path.name, max(0, int(math.ceil(dl - now)))) for d, (_src, dl) in self._pending.items()]
+        text = "Borrando " + " · ".join(parts)
+        self.wait.label.set_text(text)
+        if not self.wait.get_reveal_child():
+            self.wait.set_reveal_child(True)
+            if DEBUG:
+                GLib.timeout_add(300, self._log_wait)   # dónde queda Cancelar, cuando el revelador lo haya colocado
+        if self._wait_tick is None:
+            self._wait_tick = GLib.timeout_add(1000, self._wait_tick_cb)
+        if log_it:
+            log("toast espera: %s" % text)
+
+    def _wait_tick_cb(self):
+        if not self._pending:
+            self._wait_tick = None
+            return False
+        self._refresh_wait()
+        return True
+
+    def _log_wait(self):
+        """DEBUG: coordenadas (relativas a la ventana) del botón Cancelar del aviso, para el harness."""
+        if not self.wait.get_reveal_child():
+            return False
+        pt = self.wait.cancel_btn.translate_coordinates(self, 0, 0)
+        a = self.wait.cancel_btn.get_allocation()
+        log("toast espera: cancelar=%d,%d" % (int(pt[-2]) + a.width // 2, int(pt[-1]) + a.height // 2))
+        return False
+
+    def _resume_pending(self):
+        """Borrados que quedaron programados o a medias en una ejecución anterior (ver PendingDeletes): se hacen
+        ahora, en un hilo, y esos vídeos no se cargan aunque vengan en los argumentos o en una carpeta."""
+        items = PENDING.load()
+        if not items:
+            return
+        self._skip_paths = set(pathlib.Path(x["path"]) for x in items)
+        log("pendientes: %d borrado%s de la sesión anterior" % (len(items), "" if len(items) == 1 else "s"))
+
+        def work():
+            done, errs = [], []
+            for x in items:
+                p = pathlib.Path(x["path"])
+                existed = p.exists()
+                err = remove_with_retry(p, 8.0) if existed else None
+                if err is None and x.get("cache"):
+                    shutil.rmtree(x["cache"], ignore_errors=True)
+                PENDING.remove(p)
+                if err is not None:
+                    errs.append(err)
+                    log("pendiente: no se pudo borrar %s: %s" % (p.name, err.replace("\n", " | ")))
+                elif existed:
+                    done.append(p.name)
+                    log("pendiente: borrado %s" % p.name)
+                else:
+                    log("pendiente: %s ya no existía" % p.name)
+            GLib.idle_add(self._resumed, done, errs)
+        threading.Thread(target=work, name="ts-pending", daemon=False).start()
+
+    def _resumed(self, done, errs):
+        if done:
+            self._flash("Borrado%s de la sesión anterior: %s" % ("" if len(done) == 1 else "s", ", ".join(done)))
+        if errs:
+            self._error("No se pudo borrar lo pendiente de la sesión anterior", "\n".join(errs))
+        return False
+
+    def _confirm_close(self):
+        """Con borrados programados sin disparar, avisa y pide confirmación: «Cerrar y borrar» los dispara ya (en segundo
+        plano: la ventana se cierra sin esperar) y «Volver» deja la app abierta con su aviso. True = cerrar. Si la app
+        muere sin pasar por aquí, lo programado sigue apuntado en disco y se borra al volver a abrirla."""
+        if not self._pending:
+            return True
+        docs = list(self._pending)
+        n = len(docs)
+        log("cerrar: %d pendiente%s de borrar" % (n, "" if n == 1 else "s"))
+        dlg = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.WARNING,
+                                buttons=Gtk.ButtonsType.NONE,
+                                text="Hay %s pendiente%s de borrar" % ("un vídeo" if n == 1 else "%d vídeos" % n,
+                                                                       "" if n == 1 else "s"))
+        dlg.format_secondary_text("%s\n\nAl cerrar se borra%s ya, en segundo plano. Para conservar alguno, vuelve y pulsa "
+                                  "Cancelar en el aviso." % ("\n".join(str(d.path) for d in docs), "" if n == 1 else "n"))
+        dlg.add_button("_Volver", Gtk.ResponseType.CANCEL)
+        btn = dlg.add_button("Cerrar y _borrar", Gtk.ResponseType.ACCEPT)
+        btn.get_style_context().add_class("destructive-action")
+        dlg.set_default_response(Gtk.ResponseType.ACCEPT)   # Intro cierra (ver on_delete), Esc vuelve
+        btn.grab_focus()
+        resp = dlg.run()
+        dlg.destroy()
+        if resp != Gtk.ResponseType.ACCEPT:
+            log("cerrar: se vuelve")
+            return False
+        fired = 0
+        for doc in docs:
+            entry = self._pending.pop(doc, None)
+            if entry is None:
+                continue   # se disparó solo mientras el diálogo estaba abierto
+            GLib.source_remove(entry[0])
+            doc.doomed = False
+            self._delete_file(doc)   # hilo no daemon: termina aunque la ventana ya no esté
+            fired += 1
+        log("cerrar: confirmado, %d borrado%s en marcha" % (fired, "" if fired == 1 else "s"))
+        self._refresh_wait()
+        return True
+
+    def on_delete_event(self, *_):
+        """Botón de cerrar de la ventana: con borrados programados pregunta antes (ver _confirm_close)."""
+        return not self._confirm_close()
 
     def _delete_file(self, doc, ok_text=None, err_text=None, ok_log=None):
         """Borra el vídeo de `doc` del disco (directamente, sin papelera) y su caché, en un hilo aparte: el
@@ -5595,6 +5876,9 @@ class ThumbSheet(Gtk.Window):
             err = remove_with_retry(doc.path, 8.0)
             if err is None and doc.cache_dir:
                 shutil.rmtree(str(doc.cache_dir), ignore_errors=True)
+            PENDING.remove(doc.path)   # hecho (o fallido y avisado): la próxima ejecución no lo reintenta
+            if err is None:
+                log("borrado: %s" % doc.path.name)   # también si la ventana ya se cerró (el aviso de abajo no llegaría)
             GLib.idle_add(self._delete_done, doc, err, ok_text, err_text, ok_log)
         # no daemon: si se cierra la app a medias, el borrado confirmado termina igualmente
         threading.Thread(target=work, name="ts-delete", daemon=False).start()
@@ -5690,7 +5974,11 @@ class ThumbSheet(Gtk.Window):
         if err:
             if doc.row is not None:
                 doc.row.set_sensitive(True)
+                doc.row.set_visible(not doc.hidden)   # si venía de Eliminar, su fila estaba escondida
                 doc.row.sub_label.set_markup(sub_markup(doc.subtitle))
+            if doc.folder is not None:
+                self._refresh_folder(doc.folder.root or doc.folder)
+            self._update_count()
             self._error(err_text, err)
             return False
         log(ok_log or ("eliminado: %s" % doc.path.name))
@@ -5874,7 +6162,8 @@ class ThumbSheet(Gtk.Window):
                     self._preview_step(-10 ** 9 if event.keyval == Gdk.KEY_Home else 10 ** 9)
                 return True
         if ctrl and event.keyval in (Gdk.KEY_q, Gdk.KEY_w):
-            self.destroy()
+            if self._confirm_close():
+                self.destroy()
             return True
         if ctrl and event.keyval == Gdk.KEY_o:
             self.add_paths(choose_videos(self))
@@ -5983,6 +6272,7 @@ def main(argv):
         .ts-toast { border-radius: 8px; padding: 10px 14px; box-shadow: 0 2px 10px rgba(0,0,0,0.55); }
         .ts-toast-ok { background-color: #2e7d32; }
         .ts-toast-err { background-color: #c62828; }
+        .ts-toast-wait { background-color: #b45309; }
         .ts-toast label, .ts-toast button { color: #ffffff; }
         .ts-toast label selection { background-color: #ffffff; color: #c62828; }
         .dim-label { opacity: 0.8; }

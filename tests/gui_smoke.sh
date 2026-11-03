@@ -4,7 +4,8 @@
 # xdotool recorre: rueda sobre el slider de intervalo, clic/arrastre/Shift+clic/doble clic de teselas, un corte que
 # falla a propósito (toast rojo, Esc lo cierra), Cortar sin pérdida, cambio de intervalo sin alterar segmentos, vista
 # ampliada (flechas y rueda, recuadro rojo, Mayús marca/desmarca y arrastra, reproducción muda, seek ±intervalo y ±1 s con Ctrl), cambio de vídeo, centrado al cambiar columnas, Escape,
-# Cortar y borrar original (doble pulsación, desarme a los 5 s), Eliminar con confirmación, Ctrl+Q, y SIGKILL
+# Cortar y borrar original (doble pulsación, desarme a los 5 s), Eliminar con confirmación (sale de la lista al momento y
+# se borra a los 10 s, con aviso para cancelar), Ctrl+Q, y SIGKILL
 # en plena generación sin huérfanos. Capturas PNG en `out`.
 # Las expectativas se calculan a partir del intervalo (S) y las columnas (COLS) reales. El vídeo A debe
 # tener keyframes cada 6 s (grabación de Teams) para la comprobación del corte.
@@ -253,14 +254,20 @@ sleep 2; shot 10b-tras-cortar-borrar 0.5
 grep -q "archivos: 1" "$OUT/app.log" && ok "cabecera del panel: 1 archivo tras cortar y borrar" || ko "cabecera no bajó a 1: $(grep -o 'archivos: [0-9]*' "$OUT/app.log" | tail -1)"
 sleep 1.5; grep -q "segundo plano: $(basename "$CUT")\|vídeo: $(basename "$CUT")\|estado: $(basename "$CUT")" "$OUT/app.log" && ko "el cortado se añadió al panel" || ok "los cortados no se añaden al panel (ninguno de los dos)"
 
-# 11. Eliminar con confirmación (Intro acepta en el diálogo) sobre el vídeo a la vista: la copia de B (la lista
-#     queda vacía). Sólo se pulsa si lo que está a la vista es efectivamente la copia.
+# 11. Eliminar con confirmación (Intro acepta en el diálogo) sobre el vídeo a la vista: la copia de B sale de la lista
+#     al momento (queda vacía) pero sigue en disco hasta pasados los 10 s de gracia del aviso con Cancelar; luego se
+#     borra. Sólo se pulsa si lo que está a la vista es efectivamente la copia.
 if [[ "$(shown)" == "$(basename "$VIDEO_B")" ]]; then
   xdotool mousemove $((X+DX)) $((Y+DY)) click 1; shot 10-dialogo-eliminar 1
   xdotool key Return; sleep 1.2
-  [[ ! -f "$VIDEO_B" ]] && ok "Intro acepta el diálogo: archivo eliminado del disco (copia de B); la lista queda vacía" || ko "Intro no eliminó: el archivo sigue existiendo"
+  [[ -f "$VIDEO_B" ]] && grep -q "eliminar: programado $(basename "$VIDEO_B") (en 10 s)" "$OUT/app.log" && ok "Intro acepta el diálogo: la copia de B sale de la lista y queda programada; sigue en disco durante los 10 s de gracia" || ko "tras Intro: el archivo $([[ -f "$VIDEO_B" ]] && echo sigue || echo YA NO ESTÁ) · $(grep 'eliminar:' "$OUT/app.log" | tail -1)"
+  grep -q "toast espera: Borrando $(basename "$VIDEO_B") en" "$OUT/app.log" && ok "aviso abajo con Cancelar" || ko "sin aviso de borrado programado: $(grep 'toast' "$OUT/app.log" | tail -1)"
+  shot 10b-aviso-borrando 0.2
+  for i in $(seq 1 60); do [[ ! -f "$VIDEO_B" ]] && break; sleep 0.25; done
+  [[ ! -f "$VIDEO_B" ]] && ok "a los 10 s se borra del disco; la lista queda vacía" || ko "pasados 15 s el archivo sigue existiendo"
 else ko "Eliminar omitido: a la vista está '$(shown)', no la copia de B"; fi
 [[ -f "$VIDEO_B_ORIG" && -f "$VIDEO_A" ]] || { echo "¡¡un vídeo ORIGINAL ha desaparecido!!"; fail=1; }
+for i in $(seq 1 20); do grep -q "toast ok: Eliminado" "$OUT/app.log" && break; sleep 0.25; done
 grep -q "toast ok: Eliminado" "$OUT/app.log" && ok "toast verde al eliminar" || ko "sin toast ok al eliminar"
 grep -q "archivos: 0" "$OUT/app.log" && ok "cabecera del panel: sin archivos tras eliminar" || ko "cabecera no bajó a 0: $(grep -o 'archivos: [0-9]*' "$OUT/app.log" | tail -1)"
 shot 11-tras-eliminar 1

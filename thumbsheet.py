@@ -325,7 +325,13 @@ FULL_DEC = ["-threads", "1", "-skip_frame", "noref"]   # fotograma a resolución
 # ----------------------------------------------------------------------------------------------
 # sondeo del vídeo
 # ----------------------------------------------------------------------------------------------
+INFO_FILE = "info.json"   # el sondeo, guardado en la caché del vídeo: uno ya visto en otra sesión no repite ffprobe
+INFO_VERSION = 1
+
+
 class VideoInfo(object):
+    SAVED = ("duration", "width", "height", "aspect", "fps", "rotated", "codec", "has_audio", "gop")
+
     def __init__(self, path):
         self.path = pathlib.Path(path).resolve()
         st = self.path.stat()
@@ -338,7 +344,9 @@ class VideoInfo(object):
         self.codec = "?"
         self.has_audio = False
         self.gop = None                       # segundos entre keyframes (None = desconocido/enorme)
-        self._probe()
+        self.from_cache = self._load()        # True: datos de info.json, sin lanzar ffprobe
+        if not self.from_cache:
+            self._probe()
         # tamaño de la miniatura guardada (par, lado mayor = THUMB_MAX, sin ampliar vídeos pequeños)
         scale = min(1.0, THUMB_MAX / float(max(self.width, self.height) or THUMB_MAX))
         self.thumb_w = max(2, int(round(self.width * scale / 2.0)) * 2)
@@ -349,6 +357,37 @@ class VideoInfo(object):
         h = hashlib.sha1()
         h.update(("%s|%d|%d|%d" % (self.path, self.size, self.mtime_ns, THUMB_MAX)).encode("utf-8"))
         return h.hexdigest()[:16]
+
+    def _load(self):
+        """Sondeo de otra sesión, de info.json en la caché del vídeo. La clave de la caché lleva ruta, tamaño y fecha:
+        si el fichero cambia, la carpeta es otra y se vuelve a sondear. True si los datos valen."""
+        try:
+            data = json.loads((CACHE_ROOT / self.key / INFO_FILE).read_text(encoding="utf-8"))
+            if data.get("v") != INFO_VERSION:
+                return False
+            vals = dict((k, float(data[k])) for k in ("duration", "aspect", "fps"))
+            vals.update((k, int(data[k])) for k in ("width", "height"))
+            vals.update(rotated=bool(data["rotated"]), has_audio=bool(data["has_audio"]), codec=str(data["codec"]),
+                        gop=None if data["gop"] is None else float(data["gop"]))
+        except (OSError, ValueError, TypeError, KeyError, AttributeError):
+            return False
+        if not all(vals[k] > 0 for k in ("duration", "aspect", "fps", "width", "height")) or \
+                (vals["gop"] is not None and not vals["gop"] > 0):
+            return False
+        for k, v in vals.items():
+            setattr(self, k, v)
+        return True
+
+    def save(self, cache_dir):
+        """Guarda el sondeo en la caché del vídeo (temporal oculto + rename: nunca queda un info.json a medias)."""
+        data = dict((k, getattr(self, k)) for k in self.SAVED)
+        data["v"] = INFO_VERSION
+        tmp = pathlib.Path(cache_dir) / (".%s.tmp" % INFO_FILE)
+        try:
+            tmp.write_text(json.dumps(data), encoding="utf-8")
+            os.replace(str(tmp), str(pathlib.Path(cache_dir) / INFO_FILE))
+        except OSError:
+            pass
 
     def _probe(self):
         cmd = ["ffprobe", "-v", "error", "-show_streams", "-show_format", "-of", "json", str(self.path)]
@@ -2758,15 +2797,19 @@ class Toast(Gtk.Revealer):
 
 class WaitToast(Gtk.Revealer):
     """Aviso abajo, encima del toast de resultado, de los borrados programados por Eliminar («Borrando x en 9 s»), con
-    el botón Cancelar, que los anula todos. El texto (con la cuenta atrás) lo pone la ventana."""
+    el botón Cancelar, que los anula todos. El texto (con la cuenta atrás) lo pone la ventana. El de los cortes en cola
+    es otro igual, con su propio Cancelar."""
 
-    def __init__(self, on_cancel):
+    MARGIN = 84   # por encima del toast de resultado, que puede salir a la vez («Eliminado: …»)
+    STEP = 56     # alto de un aviso más su separación: el de cortes se apila encima del de borrados
+
+    def __init__(self, on_cancel, tooltip="No borrar: los vídeos vuelven a la lista"):
         super(WaitToast, self).__init__()
         self.set_transition_type(Gtk.RevealerTransitionType.SLIDE_UP)
         self.set_transition_duration(180)
         self.set_halign(Gtk.Align.CENTER)
         self.set_valign(Gtk.Align.END)
-        self.set_margin_bottom(84)   # por encima del toast de resultado, que puede salir a la vez («Eliminado: …»)
+        self.set_margin_bottom(self.MARGIN)
         self.box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         self.box.get_style_context().add_class("ts-toast")
         self.box.get_style_context().add_class("ts-toast-wait")
@@ -2777,7 +2820,7 @@ class WaitToast(Gtk.Revealer):
         self.box.pack_start(self.label, True, True, 0)
         self.cancel_btn = Gtk.Button(label="Cancelar")
         self.cancel_btn.set_relief(Gtk.ReliefStyle.NONE)
-        self.cancel_btn.set_tooltip_text("No borrar: los vídeos vuelven a la lista")
+        self.cancel_btn.set_tooltip_text(tooltip)
         self.cancel_btn.connect("clicked", lambda *_: on_cancel())
         self.box.pack_start(self.cancel_btn, False, False, 0)
         self.add(self.box)
@@ -2945,9 +2988,30 @@ def full_output_path(video_path):
         k += 1
 
 
-def keyframes_near(path, times, window):
+def run_cancellable(cmd, cancel=None, timeout=600):
+    """stdout de `cmd`, o None si falla al lanzarse, pasa `timeout` s o se activa `cancel` (threading.Event): en esos
+    dos casos el proceso se mata en seco (SIGKILL) y se vuelve enseguida."""
+    if cancel is not None and cancel.is_set():
+        return None
+    try:
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=FF_ENV)
+    except OSError:
+        return None
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return p.communicate(timeout=0.2)[0]
+        except subprocess.TimeoutExpired:
+            if (cancel is not None and cancel.is_set()) or time.monotonic() > deadline:
+                p.kill()
+                p.communicate()
+                return None
+
+
+def keyframes_near(path, times, window, cancel=None):
     """Instantes (s) de los keyframes de vídeo en las ventanas [t-window, t+window] de cada t. Sólo
-    demux (ffprobe -show_packets con -read_intervals): no decodifica ni lee el fichero entero."""
+    demux (ffprobe -show_packets con -read_intervals): no decodifica ni lee el fichero entero. Con `cancel`
+    (threading.Event) activado, el ffprobe se mata y no devuelve nada."""
     if not times:
         return []
     if window is None:
@@ -2959,9 +3023,8 @@ def keyframes_near(path, times, window):
     if intervals:
         cmd += ["-read_intervals", ",".join(intervals)]
     cmd.append(str(path))
-    try:
-        out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=FF_ENV, timeout=600).stdout
-    except (OSError, subprocess.TimeoutExpired):
+    out = run_cancellable(cmd, cancel)
+    if out is None:
         return []
     kfs = set()
     for line in out.decode("utf-8", "replace").splitlines():
@@ -2975,16 +3038,18 @@ def keyframes_near(path, times, window):
     return sorted(kfs)
 
 
-def expand_to_keyframes(segments, path, duration, gop=None):
+def expand_to_keyframes(segments, path, duration, gop=None, cancel=None):
     """Mueve cada borde HACIA FUERA al keyframe más cercano (inicio: el anterior o igual; fin: el siguiente o
     igual) para que la copia de streams no pierda nada de lo seleccionado. Ventanas de búsqueda crecientes
-    y, como último recurso, un barrido completo."""
+    y, como último recurso, un barrido completo. Con `cancel` (threading.Event) activado devuelve None en seguida."""
     base = max(20.0, 2.0 * (gop or 10.0))
     starts = [a for a, _ in segments]
     ends = [b for _, b in segments]
     kfs = []
     for window in (base, base * 6, None):
-        kfs = keyframes_near(path, starts + ends, window)
+        kfs = keyframes_near(path, starts + ends, window, cancel)
+        if cancel is not None and cancel.is_set():
+            return None
         ok = True
         for a in starts:
             if a > 0.05 and not any(k <= a + 1e-3 for k in kfs) and (window is None or a - window > 0):
@@ -3569,12 +3634,17 @@ class Document(object):
         self.folder = None                    # carpeta del panel (raíz o subcarpeta) bajo la que está su fila
         self.hidden = False                   # oculto por el ojo de su carpeta (ya cortado): ni a la vista ni en 2.º plano
         self.doomed = False                   # Eliminar confirmado, a la espera de los segundos para cancelar: fila escondida
+        self.cov = None                       # (intervalo, hechas, total) de su caché; None = hay que recontar (listdir)
+        self.cut_jobs = 0                     # cortes suyos en cola o en marcha: no se puede eliminar, Full ni otro corte
         self.lock = threading.Lock()
 
     def ensure_info(self):
+        """Sondea el vídeo (o lee el sondeo guardado) si no se ha hecho ya. Lo pueden pedir a la vez la cola de sondeo y
+        el sondeo urgente del vídeo a la vista: el cerrojo hace que sólo uno trabaje. True si esta llamada lo ha hecho
+        (con éxito o con error); False si ya estaba hecho."""
         with self.lock:
             if self.info is not None or self.error is not None:
-                return
+                return False
             try:
                 info = VideoInfo(self.path)
                 cache_dir = CACHE_ROOT / info.key
@@ -3587,17 +3657,20 @@ class Document(object):
                             leftover.unlink()
                         except OSError:
                             pass
+                if not info.from_cache:
+                    info.save(cache_dir)
             except Exception as e:  # noqa: BLE001
                 # OSError/RuntimeError normalmente; cualquier otra cosa (salida rara de ffprobe, caché que no se
                 # puede crear…) también deja el vídeo en error: el hilo de sondeo no puede morir (ver _busy)
                 self.error = short_error(str(e), "no se pudo abrir")
-                return
+                return True
             try:
                 self.selection = Selection.from_json(json.loads((cache_dir / "selection.json").read_text(encoding="utf-8")))
             except (OSError, ValueError, TypeError):
                 self.selection = Selection()
             self.cache_dir = cache_dir
             self.info = info
+            return True
 
     def save_selection(self):
         if not self.cache_dir:
@@ -3763,6 +3836,11 @@ class ThumbSheet(Gtk.Window):
         self._status_id = None                # refresco agrupado del estado (llega por captura)
         self._coverage_busy = False           # recuento de caché de las filas en marcha (hilo aparte)
         self._coverage_again = False
+        self._rows_id = None                  # refresco agrupado de los iconos de las filas (ver _refresh_row_states)
+        self._add_q = collections.deque()     # ficheros por dar de alta en el panel, por tandas (ver _add_more)
+        self._add_id = None
+        self._bg_wait_cov = False             # el segundo plano espera a que se recuenten cachés para elegir vídeo
+        self._shown = None                    # vídeo cuyo mosaico está cargado (no recargarlo si llega su sondeo)
         self._quarter = -1                    # cuadrito (0-15) del progreso ya reflejado en el icono de la fila
         self.gen_doc = None                   # vídeo que está generando self.generator (actual o 2.º plano)
         self._cut_pct = None
@@ -3849,12 +3927,15 @@ class ThumbSheet(Gtk.Window):
         bar.pack_end(self.del_btn, False, False, 0)
         self.cut_btn = Gtk.Button(label="Cortar")
         self.cut_btn.set_tooltip_text("Cortar los segmentos seleccionados y unirlos en <vídeo>-cortado (sin pérdida, en keyframes; "
-                                      "o exacto recodificando). Tecla C; en el diálogo, Intro corta y borra el original")
+                                      "o exacto recodificando). Tecla C; en el diálogo, Intro corta y borra el original. El corte "
+                                      "va a una cola en segundo plano (abajo, un aviso con su progreso y Cancelar) y se puede "
+                                      "seguir con otros vídeos")
         self.cut_btn.connect("clicked", self.on_cut)
         self._cut = None
         self.full_btn = Gtk.Button(label="Full")
         self.full_btn.set_tooltip_text("Dar por bueno el vídeo entero: lo renombra como <vídeo>-cortado (sin tocar el "
-                                       "contenido, como si se hubiera cortado de principio a fin) y lo quita de la lista")
+                                       "contenido, como si se hubiera cortado de principio a fin) y lo quita de la lista "
+                                       "(tecla F; Intro confirma)")
         self.full_btn.connect("clicked", self.on_full)
         bar.pack_end(self.full_btn, False, False, 0)
         bar.pack_end(self.cut_btn, False, False, 0)
@@ -3897,6 +3978,10 @@ class ThumbSheet(Gtk.Window):
         self.overlay.add_overlay(self.toast)
         self.wait = WaitToast(self._cancel_pending)
         self.overlay.add_overlay(self.wait)
+        self.cuts = WaitToast(self._cancel_cuts, "Cancelar el corte en marcha y los que esperan: no se borra ningún original")
+        self.overlay.add_overlay(self.cuts)
+        self._cut_queue = collections.deque()   # cortes confirmados que esperan su turno (uno cada vez, ver _cut_next)
+        self._cuts_logged = None
         self._preview_key = None
         self.player = None
         self._player_doc = None
@@ -3988,6 +4073,11 @@ class ThumbSheet(Gtk.Window):
         # sondeo de vídeos en un hilo (ffprobe), de uno en uno
         self._probe_q = queue.Queue()
         threading.Thread(target=self._probe_loop, name="ts-probe", daemon=True).start()
+        # y el del vídeo a la vista, en otro hilo y sin esperar turno: con miles de vídeos recién añadidos la cola tarda
+        # minutos; sólo cuenta el último pedido
+        self._now_cv = threading.Condition()
+        self._now_doc = None
+        threading.Thread(target=self._probe_now_loop, name="ts-probe-now", daemon=True).start()
 
         self.show_all()
         self._load_current()
@@ -4069,18 +4159,38 @@ class ThumbSheet(Gtk.Window):
         log("panel: " + " | ".join(parts))
 
     # ---- documentos --------------------------------------------------------------------------
+    ADD_SLICE = 0.03   # s de hilo de la interfaz por tanda del alta de ficheros (ver _add_more)
+
     def add_paths(self, paths):
         """Ficheros se añaden ya, cada uno bajo su carpeta del panel (con fila de carpeta nueva si hace falta), detrás de
-        los que ya tuviera; las carpetas se recorren (con subcarpetas) en un hilo y entran cuando acaba."""
-        new = []
+        los que ya tuviera; las carpetas se recorren (con subcarpetas) en un hilo y entran cuando acaba. Muchos ficheros
+        a la vez (una carpeta con miles: unos 2 s de filas nuevas) entran por tandas (ver _add_more): entre una y otra la
+        ventana responde, y el primero se ve en seguida."""
         dirs = []
         for path in paths:
+            p = pathlib.Path(path)
+            if p.is_dir():
+                try:
+                    dirs.append(p.resolve())
+                except (OSError, RuntimeError):
+                    pass
+            else:
+                self._add_q.append(p)
+        if self._add_q and self._add_id is None:
+            self._add_more()   # la primera tanda, ya
+        if dirs:
+            self._scan_dirs(dirs)
+
+    def _add_more(self):
+        """Una tanda del alta: ficheros de la cola hasta gastar ADD_SLICE (al menos uno nuevo) y, tras ella, recuentos,
+        carpetas y barra. Si quedan, sigue en otra vuelta del bucle (idle: antes se atienden teclas, ratón y dibujo)."""
+        self._add_id = None
+        new = []
+        deadline = time.perf_counter() + self.ADD_SLICE
+        while self._add_q and (not new or time.perf_counter() < deadline):
             try:
-                rp = pathlib.Path(path).resolve()
-            except OSError:
-                continue
-            if rp.is_dir():
-                dirs.append(rp)
+                rp = self._add_q.popleft().resolve()
+            except (OSError, RuntimeError):
                 continue
             if rp in self._skip_paths:
                 log("pendiente: no se carga %s (queda por borrar)" % rp.name)
@@ -4092,6 +4202,8 @@ class ThumbSheet(Gtk.Window):
             new.append(doc)
             self._probe_batch += 1
             self._probe_q.put(doc)
+        if self._add_q:
+            self._add_id = GLib.idle_add(self._add_more)
         if new:
             for root in set(d.folder.root or d.folder for d in new):   # una pasada por raíz, no por fichero
                 self._refresh_folder(root)
@@ -4105,8 +4217,7 @@ class ThumbSheet(Gtk.Window):
             first = next((d for d in new if not d.hidden), None)
             if first is not None:
                 self.listbox.select_row(first.row)
-        if dirs:
-            self._scan_dirs(dirs)
+        return False
 
     def _attach_doc(self, doc):
         """Mete `doc` en su carpeta del panel (raíz o subcarpeta; se crean si hacen falta) y en `self.docs`, en el
@@ -4526,31 +4637,64 @@ class ThumbSheet(Gtk.Window):
         elif ev == Gio.FileMonitorEvent.CHANGES_DONE_HINT and is_video_name(p.name) and p.is_file():
             self._watch_found(root, [p])
 
+    @staticmethod
+    def _probe_one(doc):
+        """Sondea `doc` (ver Document.ensure_info); True si esta llamada lo ha hecho. Nunca lanza: si el hilo que llama
+        muriera, su cola quedaría parada."""
+        try:
+            fresh = doc.ensure_info()
+        except Exception as e:  # noqa: BLE001
+            log("sondeo: excepción con %s: %r" % (doc.path.name, e))
+            fresh = doc.info is None and doc.error is None
+            if fresh:
+                doc.error = short_error(str(e), e.__class__.__name__)
+        if fresh and doc.error:
+            log("sondeo: %s: no se pudo abrir: %s" % (doc.path.name, doc.error))
+        return fresh
+
     def _probe_loop(self):
         while True:
             doc = self._probe_q.get()
             self._probing = doc
-            try:
-                doc.ensure_info()
-            except Exception as e:  # noqa: BLE001  — por si acaso: si este hilo muriera, la cola quedaría parada
-                log("sondeo: excepción con %s: %r" % (doc.path.name, e))
-                if doc.info is None and doc.error is None:
-                    doc.error = short_error(str(e), e.__class__.__name__)
-            if doc.error:
-                log("sondeo: %s: no se pudo abrir: %s" % (doc.path.name, doc.error))
+            fresh = self._probe_one(doc)
             self._probing = None
-            GLib.idle_add(self._doc_probed, doc)
+            GLib.idle_add(self._doc_probed, doc, fresh)
+            if doc.info is not None and doc.info.from_cache:
+                # leído de info.json: todo Python, sin esperar a ffprobe. Con miles seguidos, este hilo acapararía el
+                # GIL y cada llamada a GTK del hilo de la interfaz tendría que esperar su turno (la ventana, a tirones)
+                time.sleep(0.002)
 
-    def _doc_probed(self, doc):
-        if doc.row is not None:
-            doc.row.sub_label.set_markup(sub_markup(doc.subtitle))
+    def _probe_now(self, doc):
+        """El vídeo a la vista aún sin sondear: que se sondee ya (ver _probe_now_loop)."""
+        with self._now_cv:
+            self._now_doc = doc
+            self._now_cv.notify()
+
+    def _probe_now_loop(self):
+        while True:
+            with self._now_cv:
+                while self._now_doc is None:
+                    self._now_cv.wait()
+                doc, self._now_doc = self._now_doc, None
+            if doc.info is None and doc.error is None:
+                t0 = time.perf_counter()
+                if self._probe_one(doc):
+                    log("sondeo urgente: %s (%.0f ms)" % (doc.path.name, 1000 * (time.perf_counter() - t0)))
+                    GLib.idle_add(self._doc_probed, doc, True)
+
+    def _doc_probed(self, doc, fresh=True):
+        """Llega un vídeo sondeado, de la cola o del sondeo urgente. Sin `fresh` lo había hecho ya el otro hilo y sólo
+        cuenta para la barra («Analizando k de n»)."""
         if self._probe_q.qsize() == 0 and self._probing is None:
             self._probe_batch = 0      # sondeo al día: la próxima tanda cuenta desde cero
-        if doc is self.current:
-            self._load_current()
-        else:
-            self._start_next_background()
-        self._refresh_row_states()
+        if fresh:
+            if doc.row is not None:
+                doc.row.sub_label.set_markup(sub_markup(doc.subtitle))
+            if doc is self.current and self._shown is not doc:
+                self._load_current()
+            else:
+                self._start_next_background()
+            self._refresh_row_states()
         self._refresh_status()
         return False
 
@@ -4581,13 +4725,17 @@ class ThumbSheet(Gtk.Window):
         doc = self.current
         self.set_title("%s — %s" % (doc.path.name, APP) if doc else APP)
         if doc is None or doc.info is None:
+            self._shown = None
             self.sheet.set_video(16.0 / 9.0, None)
             self._progress = (0, 0)
             self._refresh_status()
             self._update_buttons()
             if doc is None:
                 GLib.idle_add(self._start_next_background)   # sin vídeo a la vista: que siga el resto
+            elif doc.error is None:
+                self._probe_now(doc)   # aún sin sondear: ya, sin esperar su turno en la cola
             return
+        self._shown = doc
         t0 = time.perf_counter()
         self.sheet.set_video(doc.info.aspect, doc.cache_dir)
         t1 = time.perf_counter()
@@ -4671,6 +4819,8 @@ class ThumbSheet(Gtk.Window):
             return
         gen.cancel()
         self.generator = None
+        if self.gen_doc is not None:
+            self.gen_doc.cov = None   # su caché ha cambiado: el icono de su fila se recuenta
         if not gen.finished and self.gen_doc is not None and self.gen_doc is not self.current:
             self.gen_doc.bg_tried = None
 
@@ -4686,7 +4836,9 @@ class ThumbSheet(Gtk.Window):
 
     def _start_next_background(self):
         """Cuando no hay nada generándose, sigue con el siguiente vídeo del panel (en orden, dando la
-        vuelta) que aún no tenga todas las capturas de este intervalo. Uno cada vez."""
+        vuelta) que aún no tenga todas las capturas de este intervalo. Uno cada vez. Qué vídeos están completos lo dice
+        el recuento de cachés de los iconos de las filas (hilo aparte), no un stat por captura aquí: con miles de vídeos
+        eso congelaba la ventana; si el siguiente candidato aún no tiene recuento, se sigue cuando llegue."""
         if self.generator is not None and not self.generator.finished:
             return False
         if not self.docs or self._busy():
@@ -4699,8 +4851,13 @@ class ThumbSheet(Gtk.Window):
             if doc is self.current or doc.info is None or doc.bg_tried == S or doc.deleting or doc.doomed or doc.gen_error \
                     or doc.hidden:
                 continue   # gen_error: no da fotogramas; no se insiste hasta que se abra ese vídeo. hidden: ya cortado
+            cov = doc.cov
+            if not isinstance(cov, tuple) or cov[0] != S:
+                self._bg_wait_cov = True   # sin recuento al día: lo pide y sigue cuando llegue (ver _refresh_rows_now)
+                self._refresh_row_states()
+                return False
             doc.bg_tried = S
-            if doc_complete(doc, S):
+            if cov[1] >= cov[2]:
                 continue
             log("segundo plano: %s" % doc.path.name)
             gen = self._start_generator(doc, foreground=False)
@@ -4755,6 +4912,8 @@ class ThumbSheet(Gtk.Window):
 
     def on_done(self):
         gen, doc = self.generator, self.gen_doc
+        if doc is not None:
+            doc.cov = None   # caché nueva: el icono de su fila se recuenta
         if gen is not None and gen.error is not None and doc is not None:
             # el vídeo no da ningún fotograma: aspa roja en el panel, fuera del segundo plano, y se sigue con el resto
             doc.gen_error = gen.error
@@ -4776,14 +4935,22 @@ class ThumbSheet(Gtk.Window):
     def _refresh_row_states(self):
         """Icono de la tercera línea de cada fila: cuartos en gris claro mientras se generan sus miniaturas (a la
         vista o en segundo plano), negros según están en caché para el intervalo actual, aspa roja si el vídeo no
-        se puede abrir o no da fotogramas."""
-        S = self.current_interval()
+        se puede abrir o no da fotogramas. El del vídeo que se está generando, al momento; el resto, agrupado (con
+        miles de vídeos llegan decenas de peticiones por segundo) y sólo de los vídeos cuya caché hay que recontar."""
         busy = self.generator is not None and not self.generator.finished
         gen_doc = self.gen_doc if busy else None
         if gen_doc is not None and gen_doc.row is not None:
             done, total = self._progress
             if gen_doc.row.state.set_progress(done, total, True) and DEBUG:
                 log("estado: %s → %s" % (gen_doc.path.name, gen_doc.row.state.state_name()))
+        if self._rows_id is None:
+            self._rows_id = GLib.timeout_add(60, self._refresh_rows_now)
+
+    def _refresh_rows_now(self):
+        self._rows_id = None
+        S = self.current_interval()
+        busy = self.generator is not None and not self.generator.finished
+        gen_doc = self.gen_doc if busy else None
         for d in self.docs:
             if d.row is None or d is gen_doc or not (d.error or d.gen_error):
                 continue
@@ -4791,51 +4958,66 @@ class ThumbSheet(Gtk.Window):
                 ("No se pudieron sacar fotogramas: %s\nClic en el vídeo para reintentar." % d.gen_error)
             if d.row.state.set_error(text) and DEBUG:
                 log("estado: %s → %s" % (d.path.name, d.row.state.state_name()))
-        docs = [d for d in self.docs if d.row is not None and d.info is not None and d is not gen_doc and not d.gen_error
-                and not d.hidden and not d.doomed]   # ocultos o a la espera de borrarse: sin icono a la vista, sin listdir
-        if not docs:
-            return
         if self._coverage_busy:
             self._coverage_again = True
-            return
+            return False
+        # sólo los que no tienen recuento de este intervalo (recién sondeados, recién generados, intervalo nuevo); los
+        # ocultos o a la espera de borrarse no tienen icono a la vista: sin listdir
+        docs = [d for d in self.docs if d.row is not None and d.info is not None and d is not gen_doc and not d.gen_error
+                and not d.hidden and not d.doomed and (d.cov is None or (isinstance(d.cov, tuple) and d.cov[0] != S))]
+        if not docs:
+            if self._bg_wait_cov:
+                self._bg_wait_cov = False
+                self._start_next_background()
+            return False
         self._coverage_busy = True
+        token = object()        # «recontándose»: si algo lo invalida mientras tanto (cov = None), el resultado no vale
+        for d in docs:
+            d.cov = token
 
         def apply(res):
             self._coverage_busy = False
             for d, (done, total) in res:
+                if d.cov is not token:
+                    continue   # invalidado mientras se recontaba: entra en la próxima pasada
                 if d.row is None or (self.generator is not None and not self.generator.finished and self.gen_doc is d):
+                    d.cov = None   # se está generando: su icono lo lleva el progreso; se recuenta al acabar
                     continue
+                d.cov = (S, done, total)
                 if d.row.state.set_progress(done, total, False) and DEBUG:
                     log("estado: %s → %s" % (d.path.name, d.row.state.state_name()))
-            if self._coverage_again:
+            if self._coverage_again or any(d.cov is None for d in docs):
                 self._coverage_again = False
                 self._refresh_row_states()
+            elif self._bg_wait_cov:
+                self._bg_wait_cov = False
+                self._start_next_background()
             return False
 
         def work():   # listdir de cada caché (miles de ficheros) fuera del hilo de la interfaz
             t0 = time.perf_counter()
-            res = [(d, self._doc_coverage(d, S)) for d in docs]
+            res = []
+            for d in docs:
+                res.append((d, self._doc_coverage(d, S)))
+                time.sleep(0)   # cede el GIL en cada vídeo: si no, cada llamada a GTK de la interfaz espera su turno
             if DEBUG:
                 _prof("cobertura(hilo)", time.perf_counter() - t0)
                 _count("cobertura_docs", len(docs))
             GLib.idle_add(apply, res)
         threading.Thread(target=work, name="ts-coverage", daemon=True).start()
+        return False
 
     @staticmethod
     def _doc_coverage(doc, S):
         """(hechas, total) de las miniaturas del intervalo S que ya están en caché (las imposibles cuentan).
-        Un listdir por vídeo; se llama en los eventos de generación, no por captura."""
+        Un listdir por vídeo; se llama en los eventos de generación, no por captura. Se buscan los nombres del plan en
+        el conjunto de nombres (en C), sin recorrer en Python los miles de ficheros de otros intervalos."""
         ts = plan_timestamps(doc.info.duration, S)
-        have = set()
         try:
-            for name in os.listdir(str(doc.cache_dir)):
-                if name.endswith(".jpg") and name[:-4].isdigit():
-                    have.add(int(name[:-4]))
-                elif name.endswith(".fail") and name[:-5].isdigit():
-                    have.add(int(name[:-5]))
+            names = set(os.listdir(str(doc.cache_dir)))
         except OSError:
-            pass
-        return sum(1 for t in ts if t in have), len(ts)
+            names = set()
+        return sum(1 for t in ts if ("%d.jpg" % t) in names or ("%d.fail" % t) in names), len(ts)
 
     def _ensure_ticker(self):
         """Mientras hay generación o corte, refresca la barra cada segundo para que la estimación avance
@@ -4895,10 +5077,9 @@ class ThumbSheet(Gtk.Window):
                     self._cut["eta_logged"] = True
                     log("eta corte:%s" % eta)
                 self.progress.set_text("Cortando… %d %%%s" % (self._cut_pct, eta))
-            bar = self._cut.get("dlg_bar")
-            if bar is not None:   # diálogo de cortar y borrar: mismo progreso
-                bar.set_fraction(self.progress.get_fraction())
-                bar.set_text(self.progress.get_text())
+            if self._cut["cancel"].is_set():
+                self.progress.set_text("Cancelando…")
+            self._refresh_cuts()   # el aviso de abajo lleva el mismo progreso
             self._ensure_ticker()
         elif self.generator is not None and not self.generator.finished and self.generator.total:
             gen = self.generator
@@ -4938,11 +5119,11 @@ class ThumbSheet(Gtk.Window):
 
     def _update_buttons(self):
         doc = self.current
-        self.del_btn.set_sensitive(doc is not None and self._cut is None)
-        self.full_btn.set_sensitive(doc is not None and self._cut is None and not doc.deleting)
+        cutting = doc is not None and doc.cut_jobs > 0   # su corte está en cola o en marcha (se cancela en el aviso)
+        self.del_btn.set_sensitive(doc is not None and not cutting)
+        self.full_btn.set_sensitive(doc is not None and not cutting and not doc.deleting)
         has_segs = bool(doc is not None and doc.info is not None and self._segments())
-        self.cut_btn.set_sensitive(has_segs or self._cut is not None)
-        self.cut_btn.set_label("Cancelar" if self._cut is not None else "Cortar")
+        self.cut_btn.set_sensitive(has_segs and not cutting)
 
     # ---- selección (clic / arrastre sobre teselas → segmentos) ----------------------------------
     def _grid(self):
@@ -5375,12 +5556,9 @@ class ThumbSheet(Gtk.Window):
 
     # ---- cortar y unir ----------------------------------------------------------------------------
     def on_cut(self, *_):
-        if self._cut is not None:
-            self._cut_cancel()
-            return
         doc = self.current
         segs = self._segments()
-        if not doc or not doc.info or not segs:
+        if not doc or not doc.info or not segs or doc.cut_jobs or doc.deleting or doc.doomed:
             return
         out = cut_output_path(doc.path)
         self._own_outputs.add(out)   # si la carpeta está vigilada, el resultado no se carga como vídeo nuevo
@@ -5395,18 +5573,16 @@ class ThumbSheet(Gtk.Window):
         dlg.set_default_response(RESP_CUT_DELETE)
         armed = [0]   # id del temporizador que desarma "cortar y borrar" (0 = sin armar)
         # Intro = cortar y borrar el original, sin armar: abrir el diálogo (C o el botón Cortar) ya fue el primer
-        # paso. Con Tab sobre Cancelar o Cortar, Intro pulsa ese botón, como siempre. Mientras corta, Intro no hace
-        # nada (un segundo Intro no debe cancelar el corte); Esc o el botón Cancelar sí cancelan.
-        phase = {"by_key": False, "running": False}
+        # paso. Con Tab sobre Cancelar o Cortar, Intro pulsa ese botón, como siempre. Al confirmar, el diálogo se
+        # cierra en seguida: el corte va a la cola, en segundo plano (ver _queue_cut).
+        by_key = [False]
 
         def on_key(d, ev):
             if ev.keyval not in (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_ISO_Enter):
                 return False
-            if phase["running"]:
-                return True
             if d.get_focus() in (cancel_btn, only_btn):
                 return False
-            phase["by_key"] = True
+            by_key[0] = True
             log("cortar: Intro = cortar y borrar original")
             d.response(RESP_CUT_DELETE)
             return True
@@ -5419,7 +5595,7 @@ class ThumbSheet(Gtk.Window):
             return False
 
         def on_response(d, rid):
-            if rid != RESP_CUT_DELETE or phase["by_key"]:
+            if rid != RESP_CUT_DELETE or by_key[0]:
                 return
             if armed[0]:                                  # segunda pulsación: la respuesta sigue su curso
                 GLib.source_remove(armed[0])
@@ -5452,54 +5628,77 @@ class ThumbSheet(Gtk.Window):
             box.pack_start(rb, False, False, 0)
         if self.settings.get("cut_mode") == "exact":
             exact.set_active(True)
-        content_widgets = [head, lossless, exact]   # lo que se oculta en modo progreso (el área de botones NO: cuelga del mismo box)
         if out.exists():
             warn = Gtk.Label(label="Ya existe %s: se sobrescribirá." % out.name)
             warn.set_xalign(0.0)
             box.pack_start(warn, False, False, 0)
-            content_widgets.append(warn)
         keys = Gtk.Label(label="Intro: cortar y borrar el original · Alt+T: sólo cortar · Esc: cancelar")
         keys.set_xalign(0.0)
         keys.get_style_context().add_class("dim-label")
         box.pack_start(keys, False, False, 0)
-        content_widgets.append(keys)
         box.show_all()
         log("cortar: diálogo %s" % doc.path.name)
         resp = dlg.run()
         use_exact = exact.get_active()
         if armed[0]:
             GLib.source_remove(armed[0])
+        dlg.destroy()
+        self._flush()   # que el diálogo desaparezca ya, antes de lo que sigue
         if resp not in (Gtk.ResponseType.ACCEPT, RESP_CUT_DELETE):
-            dlg.destroy()
             return
         self.settings["cut_mode"] = "exact" if use_exact else "copy"
-        self._cut = {"doc": doc, "segments": list(segs), "out": out, "exact": use_exact, "proc": None,
-                     "cancel": threading.Event(), "expected": total, "delete": resp == RESP_CUT_DELETE}
-        if resp == RESP_CUT_DELETE:
-            # el diálogo sigue abierto mientras dura el corte (se puede cancelar); al empezar el borrado se cierra
-            for w in content_widgets:
-                w.hide()
-            busy = Gtk.Label(label="Cortando %s…" % doc.path.name)
-            busy.set_xalign(0.0)
-            busy.set_ellipsize(Pango.EllipsizeMode.MIDDLE)
-            bar = Gtk.ProgressBar()
-            bar.set_show_text(True)
-            box.pack_start(busy, False, False, 0)
-            box.pack_start(bar, False, False, 4)
-            busy.show()
-            bar.show()
-            for rid in (Gtk.ResponseType.ACCEPT, RESP_CUT_DELETE):
-                dlg.get_widget_for_response(rid).hide()
-            phase["running"] = True   # Intro ya no hace nada; Esc / Cancelar cancelan
-            dlg.connect("response", lambda d, r: self._cut_cancel())
-            self._cut["dlg"], self._cut["dlg_bar"] = dlg, bar
-        else:
-            dlg.destroy()
-        self._cut_pct = None
+        self._queue_cut({"doc": doc, "segments": list(segs), "out": out, "exact": use_exact, "proc": None,
+                         "cancel": threading.Event(), "expected": total, "delete": resp == RESP_CUT_DELETE})
+
+    def _flush(self):
+        """Manda ya al servidor X lo pendiente (p. ej. cerrar un diálogo): así desaparece antes del trabajo que venga
+        detrás en este mismo turno del bucle."""
+        try:
+            self.get_display().flush()
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _queue_cut(self, job):
+        """Corte confirmado: a la cola, que se procesa en segundo plano y de uno en uno (ver _cut_next), mientras se
+        sigue trabajando con otros vídeos. Con «cortar y borrar original» el vídeo sale ya de la lista, como al
+        Eliminar, y se pasa al siguiente: si el corte sale bien se borra el original; si se cancela o falla, vuelve a
+        la lista. Abajo, un aviso con el progreso y Cancelar (ver _refresh_cuts)."""
+        doc = job["doc"]
+        doc.cut_jobs += 1
+        ahead = len(self._cut_queue) + (1 if self._cut is not None else 0)
+        self._cut_queue.append(job)
+        log("cortar: en cola %s%s (%d por delante)" % (doc.path.name, " y borrar original" if job["delete"] else "", ahead))
+        if job["delete"]:
+            doc.doomed = True   # fuera de la lista mientras se corta (vuelve con _unhide_cut si no se borra)
+            if doc is self.current:
+                self.hide_preview()
+            if self.generator is not None and self.gen_doc is doc:
+                self._cancel_generator()
+            if doc.row is not None:
+                doc.row.set_visible(False)
+            if doc is self.current:
+                self._show_neighbor(doc)
+            if doc.folder is not None:
+                self._refresh_folder(doc.folder.root or doc.folder)
+            self._update_count()
+            if DEBUG:
+                self._log_panel()
+            self._geometry_soon()
+        self._cut_next()
+        self._refresh_cuts()
         self._update_buttons()
-        self._refresh_status()
+
+    def _cut_next(self):
+        """Arranca el siguiente corte de la cola si no hay ninguno en marcha."""
+        if self._cut is not None or not self._cut_queue:
+            return
+        job = self._cut_queue.popleft()
+        self._cut = job
+        self._cut_pct = None
+        log("cortar: empieza %s" % job["doc"].path.name)
         self._pause_background()
-        threading.Thread(target=self._cut_worker, args=(self._cut,), name="ts-cut", daemon=True).start()
+        threading.Thread(target=self._cut_worker, args=(job,), name="ts-cut", daemon=True).start()
+        self._refresh_status()
 
     def _cut_worker(self, job):
         doc, segs, out = job["doc"], job["segments"], job["out"]
@@ -5507,8 +5706,9 @@ class ThumbSheet(Gtk.Window):
             if job["exact"]:
                 final = segs
             else:
-                final = expand_to_keyframes(segs, doc.path, doc.info.duration, doc.info.gop)
+                final = expand_to_keyframes(segs, doc.path, doc.info.duration, doc.info.gop, job["cancel"])
             if job["cancel"].is_set():
+                GLib.idle_add(self._cut_done, job, None, "cancelado")   # también si se cancela buscando keyframes
                 return
             job["final"] = final
             job["expected"] = sum(b - a for a, b in final)
@@ -5523,7 +5723,12 @@ class ThumbSheet(Gtk.Window):
             p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=FF_ENV, preexec_fn=PREEXEC)
             job["proc"] = p
             if job["cancel"].is_set():
-                p.terminate()
+                p.kill()
+            # stderr en otro hilo: si ffmpeg escribiera más de lo que cabe en la tubería (64 KB) mientras aquí se lee el
+            # progreso, se quedaría parado escribiendo y el corte no acabaría nunca
+            errbuf = []
+            drain = threading.Thread(target=lambda: errbuf.append(p.stderr.read()), name="ts-cut-err", daemon=True)
+            drain.start()
             for raw in p.stdout:
                 line = raw.decode("utf-8", "replace").strip()
                 if line.startswith("out_time_us=") or line.startswith("out_time_ms="):
@@ -5532,7 +5737,8 @@ class ThumbSheet(Gtk.Window):
                     except ValueError:
                         continue
                     GLib.idle_add(self._cut_progress, job, done)
-            err = p.stderr.read().decode("utf-8", "replace").strip()
+            drain.join()
+            err = b"".join(errbuf).decode("utf-8", "replace").strip()
             p.wait()
             if list_path.exists():
                 try:
@@ -5569,31 +5775,55 @@ class ThumbSheet(Gtk.Window):
             self._refresh_status()
         return False
 
-    def _cut_cancel(self):
+    def _cancel_cuts(self, *_):
+        """Cancelar del aviso de cortes: el que está en marcha (su ffmpeg o ffprobe se mata en seco, SIGKILL: sólo había
+        escrito un temporal, que se borra; con SIGTERM ffmpeg a veces se quedaba colgado y el corte, «cancelando» para
+        siempre) y los que esperan en la cola. Ningún original se borra: los de «cortar y borrar» vuelven a la lista."""
+        queued = list(self._cut_queue)
+        self._cut_queue.clear()
+        for job in queued:
+            log("cortar: cancelado en cola %s" % job["doc"].path.name)
+            job["doc"].cut_jobs = max(0, job["doc"].cut_jobs - 1)
+            if job["delete"]:
+                self._unhide_cut(job["doc"])
         job = self._cut
-        if job is None:
-            return
-        job["cancel"].set()
-        if job["proc"] is not None:
-            try:
-                job["proc"].terminate()
-            except OSError:
-                pass
-        self.progress.set_text("Cancelando…")
-        if job.get("dlg_bar") is not None:
-            job["dlg_bar"].set_text("Cancelando…")
+        if job is not None and not job["cancel"].is_set():
+            log("cortar: cancelando %s" % job["doc"].path.name)
+            job["cancel"].set()
+            p = job.get("proc")
+            if p is not None:
+                try:
+                    p.kill()
+                except OSError:
+                    pass
+        self._refresh_cuts()
+        self._refresh_status()
+        self._update_buttons()
+
+    def _unhide_cut(self, doc):
+        """El vídeo de un «cortar y borrar» que al final no se borra (corte cancelado o fallido) vuelve a la lista."""
+        doc.doomed = False
+        if doc.row is not None:
+            doc.row.set_visible(not doc.hidden)
+        if doc.folder is not None:
+            self._refresh_folder(doc.folder.root or doc.folder)
+        self._update_count()
+        self._refresh_row_states()
+        if self.current is None and self._usable(doc):
+            self.listbox.select_row(doc.row)
+        if DEBUG:
+            self._log_panel()
+        self._geometry_soon()
 
     def _cut_done(self, job, duration, error):
         if self._cut is not job:
             return False
         self._cut = None
         self._cut_pct = None
-        if job.get("dlg") is not None:
-            job["dlg"].destroy()   # terminó el corte: lo que sigue (borrar el original) va en segundo plano
-        self._update_buttons()
-        GLib.idle_add(self._start_next_background)
-        self._refresh_status()
+        doc = job["doc"]
+        doc.cut_jobs = max(0, doc.cut_jobs - 1)
         out = job["out"]
+        delete = False
         if error == "cancelado":
             self._flash("Corte cancelado")
             log("cut: cancelado")
@@ -5611,12 +5841,73 @@ class ThumbSheet(Gtk.Window):
                 self._error(txt, "La duración del resultado (%s) no coincide con la esperada (%s): revisa el fichero.%s" % (
                     fmt_time(duration), fmt_time(job["expected"]), " El original se conserva." if job["delete"] else ""))
             elif job["delete"]:
-                self._delete_file(job["doc"], ok_text="%s · original borrado" % txt,
-                                  err_text="%s · no se pudo borrar el original" % txt,
-                                  ok_log="cut: original borrado %s" % job["doc"].path.name)
+                delete = True
             else:
                 self._flash(txt)
+        if delete:
+            doc.doomed = False   # deja de esperar: ahora se borra, en segundo plano (la fila sigue escondida)
+            self._delete_file(doc, ok_text="%s · original borrado" % txt,
+                              err_text="%s · no se pudo borrar el original" % txt,
+                              ok_log="cut: original borrado %s" % doc.path.name)
+        elif job["delete"]:
+            self._unhide_cut(doc)   # cancelado o fallido: el original se conserva y vuelve a la lista
+        self._update_buttons()
+        self._cut_next()
+        if self._cut is None:
+            GLib.idle_add(self._start_next_background)
+        self._refresh_cuts()
+        self._refresh_status()
         return False
+
+    def _refresh_cuts(self):
+        """Aviso de cortes, abajo (encima del de borrados si está): el que está en marcha, con su progreso, y los que
+        esperan en la cola, con Cancelar."""
+        job = self._cut
+        if job is None and not self._cut_queue:
+            if self.cuts.get_reveal_child():
+                self.cuts.set_reveal_child(False)
+                self._cuts_logged = None
+                log("toast cortes: ninguno")
+            return
+        state = []
+        if job is not None:
+            name = job["doc"].path.name
+            if job["cancel"].is_set():
+                state.append("Cancelando el corte de %s…" % name)
+            else:
+                state.append("Cortando %s%s" % (name, " (y luego se borra el original)" if job["delete"] else ""))
+        if self._cut_queue:
+            state.append("en cola: " + ", ".join(j["doc"].path.name for j in self._cut_queue))
+        parts = list(state)
+        if job is not None and not job["cancel"].is_set():
+            parts[0] += (" · %d %%" % self._cut_pct) if self._cut_pct is not None else \
+                (" · analizando keyframes…" if not job["exact"] else " · preparando…")
+        self.cuts.label.set_text(" · ".join(parts))
+        if state != self._cuts_logged:   # sin el porcentaje: una línea por cambio de corte o de cola
+            self._cuts_logged = state
+            log("toast cortes: %s" % " · ".join(state))
+        self._place_toasts()
+        if not self.cuts.get_reveal_child():
+            self.cuts.set_reveal_child(True)
+            if DEBUG:
+                GLib.timeout_add(300, self._log_cuts)   # dónde queda Cancelar, cuando el revelador lo haya colocado
+
+    def _log_cuts(self):
+        """DEBUG: coordenadas (relativas a la ventana) del botón Cancelar del aviso de cortes, para el harness."""
+        if not self.cuts.get_reveal_child():
+            return False
+        pt = self.cuts.cancel_btn.translate_coordinates(self, 0, 0)
+        a = self.cuts.cancel_btn.get_allocation()
+        log("toast cortes: cancelar=%d,%d" % (int(pt[-2]) + a.width // 2, int(pt[-1]) + a.height // 2))
+        return False
+
+    def _place_toasts(self):
+        """El aviso de cortes va justo encima del de borrados cuando están los dos; si no, en su sitio."""
+        m = WaitToast.MARGIN + (WaitToast.STEP if self.wait.get_reveal_child() else 0)
+        if self.cuts.get_margin_bottom() != m:
+            self.cuts.set_margin_bottom(m)
+            if DEBUG and self.cuts.get_reveal_child():
+                GLib.timeout_add(300, self._log_cuts)   # Cancelar ha cambiado de sitio
 
     def _refresh_output(self, out):
         """El fichero cortado NO se añade al panel. Pero si ya estaba cargado (se ha sobrescrito), se quita y
@@ -5633,10 +5924,10 @@ class ThumbSheet(Gtk.Window):
     # ---- eliminar -------------------------------------------------------------------------------
     def on_delete(self, *_):
         doc = self.current
-        if doc is None or doc.deleting or doc.doomed or self._cut is not None:
+        if doc is None or doc.deleting or doc.doomed or doc.cut_jobs:
             return
-        try:
-            size = human_size(doc.path.stat().st_size)
+        try:   # el tamaño del sondeo si lo hay: un stat en una carpeta remota puede tardar en abrir el diálogo
+            size = human_size(doc.info.size if doc.info is not None else doc.path.stat().st_size)
         except OSError:
             size = "?"
         dlg = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.WARNING,
@@ -5652,6 +5943,7 @@ class ThumbSheet(Gtk.Window):
         log("eliminar: diálogo %s" % doc.path.name)
         resp = dlg.run()
         dlg.destroy()
+        self._flush()   # que el diálogo desaparezca ya, antes de pasar al siguiente vídeo
         if resp != Gtk.ResponseType.ACCEPT:
             log("eliminar: cancelado")
             return
@@ -5731,6 +6023,7 @@ class ThumbSheet(Gtk.Window):
         """Texto del aviso de borrados programados (cuenta atrás por vídeo) y su temporizador de un segundo."""
         if not self._pending:
             self.wait.set_reveal_child(False)
+            self._place_toasts()
             if self._wait_tick is not None:
                 GLib.source_remove(self._wait_tick)
                 self._wait_tick = None
@@ -5743,6 +6036,7 @@ class ThumbSheet(Gtk.Window):
         self.wait.label.set_text(text)
         if not self.wait.get_reveal_child():
             self.wait.set_reveal_child(True)
+            self._place_toasts()
             if DEBUG:
                 GLib.timeout_add(300, self._log_wait)   # dónde queda Cancelar, cuando el revelador lo haya colocado
         if self._wait_tick is None:
@@ -5886,7 +6180,7 @@ class ThumbSheet(Gtk.Window):
     # ---- Full: el vídeo entero vale tal cual ----------------------------------------------------
     def on_full(self, *_):
         doc = self.current
-        if doc is None or doc.deleting or self._cut is not None:
+        if doc is None or doc.deleting or doc.cut_jobs:
             return
         target = full_output_path(doc.path)
         dlg = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
@@ -5900,6 +6194,7 @@ class ThumbSheet(Gtk.Window):
         btn.grab_focus()
         resp = dlg.run()
         dlg.destroy()
+        self._flush()   # que el diálogo desaparezca ya, antes de pasar al siguiente vídeo
         if resp != Gtk.ResponseType.ACCEPT:
             return
         self._rename_full(doc, target)
@@ -6188,8 +6483,12 @@ class ThumbSheet(Gtk.Window):
                 self.on_delete()
             return True
         if plain and event.keyval in (Gdk.KEY_c, Gdk.KEY_C):   # C = Cortar (con su diálogo); nunca cancela un corte en marcha
-            if self._cut is None and self.cut_btn.get_sensitive():
+            if self.cut_btn.get_sensitive():
                 self.on_cut()
+            return True
+        if plain and event.keyval in (Gdk.KEY_f, Gdk.KEY_F):   # F = Full (con su diálogo; Intro confirma)
+            if self.full_btn.get_sensitive():
+                self.on_full()
             return True
         return False
 

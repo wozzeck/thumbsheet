@@ -244,11 +244,11 @@ xdotool mousemove $((X+CX)) $((Y+CY)) click 1; sleep 1; xdotool key alt+b; shot 
 [[ -n "$(dlg)" && -f "$COPY" ]] && ok "cortar y borrar: la primera pulsación sólo arma el botón (diálogo abierto, original intacto)" || ko "primera pulsación: diálogo='$(dlg)' original=$([[ -f "$COPY" ]] && echo sigue || echo BORRADO)"
 sleep 5.5; xdotool key alt+b; sleep 1
 [[ -n "$(dlg)" && -f "$COPY" ]] && ok "pasados 5 s se desarma: la pulsación tardía tampoco confirma" || ko "la pulsación tardía confirmó: diálogo='$(dlg)' original=$([[ -f "$COPY" ]] && echo sigue || echo BORRADO)"
-xdotool key alt+b
+xdotool key alt+b; sleep 0.8
+[[ -z "$(dlg)" ]] && ok "el diálogo de corte se cierra al confirmar (el corte va a la cola, en segundo plano)" || ko "el diálogo de corte sigue abierto tras confirmar"
 for i in $(seq 1 60); do grep -q "cut: original borrado" "$OUT/app.log" && break; [[ "$(grep -c "cut: error" "$OUT/app.log" || true)" -gt "$NERR" ]] && break; sleep 0.5; done
 [[ ! -f "$COPY" && -f "$CUT" ]] && ok "segunda pulsación: corta y borra el original" || ko "cortar y borrar: original=$([[ -f "$COPY" ]] && echo sigue || echo borrado) corte=$([[ -f "$CUT" ]] && echo sí || echo no) · $(grep 'cut:' "$OUT/app.log" | tail -1)"
 grep -q "toast ok: Cortado.*original borrado" "$OUT/app.log" && ok "toast verde: cortado y original borrado" || ko "sin toast de cortado+borrado: $(grep 'toast' "$OUT/app.log" | tail -1)"
-sleep 0.5; [[ -z "$(dlg)" ]] && ok "el diálogo de corte se cierra al terminar el corte (el borrado sigue en segundo plano)" || ko "el diálogo de corte sigue abierto"
 sleep 2; shot 10b-tras-cortar-borrar 0.5
 [[ "$(grep -c "vídeo: $(basename "$VIDEO_B")" "$OUT/app.log" || true)" -gt "$NV" && "$(shown)" == "$(basename "$VIDEO_B")" ]] && ok "el original sale del panel y se abre el siguiente de la lista ($(basename "$VIDEO_B"))" || ko "tras cortar y borrar se muestra '$(shown)'"
 grep -q "archivos: 1" "$OUT/app.log" && ok "cabecera del panel: 1 archivo tras cortar y borrar" || ko "cabecera no bajó a 1: $(grep -o 'archivos: [0-9]*' "$OUT/app.log" | tail -1)"

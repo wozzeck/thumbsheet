@@ -55,7 +55,10 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   (aparece en cuanto hay base para calcularlo y se refresca cada segundo). Mientras se analizan los
   ficheros recién añadidos (ffprobe, de uno en uno) la barra dice «Analizando k de n archivos…», y
   «Buscando vídeos en la carpeta…» mientras se recorre una carpeta; el segundo plano espera a que el
-  análisis termine para no quitarle máquina.
+  análisis termine para no quitarle máquina. El análisis de cada vídeo se guarda en su caché (`info.json`):
+  uno ya abierto en otra sesión no vuelve a pasar por ffprobe y está listo al instante. El vídeo a la vista que
+  aún no se ha analizado se analiza ya, aparte, sin esperar su turno en la cola. Con miles de ficheros, las filas
+  del panel entran por tandas: la ventana responde mientras tanto y el primer vídeo se ve en seguida.
 - **Cambios de orientación o resolución**: cada miniatura sale con su propia proporción (también con el
   SAR de los anamórficos), sin deformar ni rellenar. En el mosaico, las filas de un vídeo así tienen
   altura propia: todas las teselas de una fila miden lo mismo de alto y el ancho va con su formato, de
@@ -109,8 +112,8 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   marcado, sin moverse, lo desmarca. GStreamer elige
   solo el decodificador por hardware si lo hay (VA-API). Sin dispositivo de sonido, reproduce en silencio.
   `THUMBSHEET_AUDIO=0` silencia siempre.
-- **Full**: el vídeo entero vale tal cual: lo renombra a `<vídeo>-cortado.<ext>` (mismo contenedor, el
-  contenido no se toca, como si se hubiera cortado de principio a fin) y lo quita de la lista, tras
+- **Full** (también la tecla `F`): el vídeo entero vale tal cual: lo renombra a `<vídeo>-cortado.<ext>` (mismo
+  contenedor, el contenido no se toca, como si se hubiera cortado de principio a fin) y lo quita de la lista, tras
   confirmar (Intro acepta, Esc cancela). Si ya existe ese nombre usa `-cortado-2`, `-cortado-3`… La caché de
   miniaturas se mueve con él, así que reabrir el renombrado no regenera nada. Mismas esperas y reintentos
   que Eliminar (ffmpeg con el vídeo abierto, «ocupado» en carpetas remotas).
@@ -124,16 +127,19 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
     disco en copiar. Los tramos salen en el orden del panel de segmentos; si al crecer hasta los keyframes
     dos tramos consecutivos en el corte se solapan, se funden en uno para no repetir fotogramas.
   - *Exacto al fotograma*: recodifica (H.264 CRF 20 + AAC). Preciso, pero recomprime y es lento.
-  El progreso se ve en el contador y el botón pasa a "Cancelar" mientras dura. El resultado queda junto
+  Al confirmar, el diálogo se cierra en seguida y el corte va a una **cola en segundo plano**: los cortes se hacen
+  de uno en uno, por orden, mientras sigues con otros vídeos. Abajo queda un aviso con el que está en marcha, su
+  progreso (también en el contador) y los que esperan, con **Cancelar**, que para el corte en marcha en el acto
+  (su ffmpeg se mata y el temporal se borra) y quita de la cola los demás. Mientras el corte de un vídeo espera o
+  está en marcha, ese vídeo no se puede eliminar, dar por bueno ni volver a cortar. El resultado queda junto
   al original y no se añade al panel (si ya estaba cargado, se vuelve a sondear porque ha cambiado). El botón de la derecha del diálogo, **Cortar y
   borrar original**, hace las dos cosas de una vez: hay que pulsarlo dos veces seguidas (la primera
   sólo lo arma, en rojo, y se desarma solo a los 5 s), y el original se borra únicamente si el corte
-  termina bien y la duración del resultado cuadra. Mientras dura el corte el diálogo se queda abierto
-  mostrando el progreso, con Cancelar; en cuanto empieza el borrado se cierra, y el borrado va en
-  segundo plano como con Eliminar: el original desaparece del panel y se abre el siguiente de la lista.
+  termina bien y la duración del resultado cuadra. Al confirmarlo, el vídeo sale de la lista y se abre el
+  siguiente, como con Eliminar; si el corte se cancela o falla, vuelve a la lista con el original intacto.
   Con el teclado: `C` abre el diálogo e `Intro` confirma directamente **cortar y borrar original** (abrir el
   diálogo ya es el primer paso, así que no hace falta armar nada); `Alt+T` sólo corta, `Esc` cancela y las
-  flechas eligen el modo. Con el corte en marcha, Intro no hace nada, para que un segundo Intro no lo cancele.
+  flechas eligen el modo.
 - **Panel de segmentos** (derecha, plegable con el botón **Segmentos**): los tramos seleccionados en su
   orden de corte, cada uno con su primer y último fotograma, inicio y duración; la cabecera dice cuántos
   hay y cuánto suman. Arrastra una tarjeta (por cualquier punto menos la ×) para cambiar el orden, que es
@@ -157,7 +163,8 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
 - **Avisos**: Cortar y Eliminar informan con un *toast* sobre el mosaico. Verde si ha ido bien,
   desaparece a los 3 s. Rojo si hubo un error: se queda hasta que lo cierres (`×` o `Esc`), con el texto
   seleccionable y un botón Copiar para pegar el mensaje donde haga falta. Ámbar, justo encima, el de los
-  borrados programados, con su cuenta atrás y Cancelar.
+  borrados programados, con su cuenta atrás y Cancelar, y encima de éste el de los cortes en cola, con el
+  progreso y Cancelar.
 
 La caché va por segundo, así que las capturas coincidentes entre intervalos se reutilizan: pasar de
 30 s a 1 min no genera nada, y de 30 s a 10 s sólo genera los dos tercios que faltan. Lo ya generado no
@@ -169,6 +176,7 @@ rueda o el teclado, al momento. Atajos: la rueda sobre cada slider mueve un paso
 las teselas por fila (rueda arriba, más grandes); `Ctrl+Mayús+rueda` sobre el mosaico cambia el intervalo (rueda
 arriba acerca: intervalo más corto, más teselas; abajo aleja), conservando la zona del vídeo a la vista como el
 slider; `C` abre Cortar (Intro en el diálogo = cortar y borrar original); `Supr` abre Eliminar (Intro confirma);
+`F` abre Full (Intro confirma);
 flechas arriba/abajo, Inicio y Fin en el panel pasan al vídeo anterior/siguiente a la vista (saltan las filas de
 carpeta y los ocultos); `Ctrl+A` selecciona todo; `Esc` deselecciona; `Ctrl+Q` cierra.
 
@@ -240,6 +248,15 @@ GStreamer ≥ 1.22 el plugin `va` lo hace solo.)
   tiempo se escriben con la API de texto simple de cairo. Con 16 columnas y miles de teselas, un
   fotograma cuesta unos 5 ms mientras se genera y 2,6 ms en reposo; el estado de la barra se refresca
   como mucho seis veces por segundo y el recuento de caché de cada fila va en un hilo aparte.
+- **Miles de vídeos en el panel** (medido con 3.000 vídeos ya abiertos en otra sesión): el análisis guardado
+  (`info.json`) evita los dos ffprobe por vídeo de cada arranque, que con la cola de uno en uno eran minutos de
+  «Analizando…» y dejaban esperando al vídeo elegido (ir al último de la lista: más de 60 s → 10 ms); el vídeo a
+  la vista sin analizar se analiza aparte, sin esperar turno. Las filas entran por tandas de ~30 ms (antes, 1,5–3 s
+  con la ventana congelada; ahora el primer vídeo se ve a los 0,5 s y el parón más largo es de 90 ms). El recuento
+  de caché de los iconos sólo relee los vídeos que han cambiado (antes, todos cada vez que se analizaba o generaba
+  uno: un núcleo entero ocupado sin parar) y no recorre en Python los ficheros de otros intervalos. Los hilos de
+  trabajo que son todo Python (leer `info.json`, recontar cachés) ceden el GIL a menudo: si no, cada llamada a GTK
+  del hilo de la interfaz espera su turno y la ventana va a tirones.
 - **Lanzar ffmpeg**: la señal de muerte del padre (si la app muere, mueren sus ffmpeg) se fija con
   `setpriv --pdeathsig` en vez de con `preexec_fn`, porque con `preexec_fn` Python no puede usar `vfork`
   y cada lanzamiento es un `fork` completo, 5 ms en un proceso de 180 MB que además bloquea la memoria
@@ -248,7 +265,8 @@ GStreamer ≥ 1.22 el plugin `va` lo hace solo.)
   camino lento. La autoprueba de la GPU se hace una vez por tipo de vídeo y sesión.
 - **Caché en disco** en `~/.cache/thumbsheet/<huella>/<segundo>.jpg` (miniaturas de 480 px de lado
   mayor, ~25 KB). Cambiar el intervalo reutiliza las capturas que coincidan (de 30 s a 10 s, un tercio
-  ya está) y volver a abrir el vídeo es instantáneo. La huella es ruta+tamaño+mtime.
+  ya está) y volver a abrir el vídeo es instantáneo. La huella es ruta+tamaño+mtime. Junto a las miniaturas,
+  `info.json` guarda el análisis del vídeo (duración, resolución, GOP…).
 - **Mosaico virtual** (DrawingArea + cairo): sólo se decodifican las miniaturas visibles (más una
   pantalla por delante y por detrás), en un hilo aparte, al tamaño exacto de la tesela (libjpeg
   escala por DCT, es casi gratis) y con una caché LRU acotada (64 MB por defecto). Mover el slider

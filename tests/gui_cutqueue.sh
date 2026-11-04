@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Humo de la GUI en un Xvfb propio (:65): los cortes van a una cola en segundo plano. Tres COPIAS de A (uno, dos, tres).
+# Humo de la GUI en un Xvfb propio (:65): los cortes van a una cola en segundo plano. Cinco COPIAS de A (uno, dos,
+# tres, cuatro, cinco).
 #  1. C + flecha abajo (exacto) + Intro sobre uno: el diálogo se cierra al momento, se pasa a dos, uno sale de la lista
 #     y abajo aparece el aviso «Cortando uno… (y luego se borra el original)» con Cancelar.
 #  2. Con uno cortándose, C + Alt+T (sólo cortar) sobre dos: a la cola («en cola: dos»); dos no se puede eliminar
@@ -7,10 +8,16 @@
 #  3. Cancelar en el aviso: se cancelan los dos, el ffmpeg muere en seguida, uno vuelve a la lista con su fichero y sin
 #     restos (-cortado ni .part), toast «Corte cancelado», el aviso desaparece.
 #  4. C + Intro (sin pérdida) sobre tres y Cancelar al instante (fase de keyframes o arranque de ffmpeg): también acaba
-#     en seguida y tres vuelve a la lista (antes, cancelar en esa fase dejaba el corte «cancelando» para siempre).
+#     en seguida y tres vuelve a la lista, sin -cortado (antes, cancelar en esa fase dejaba el corte «cancelando» para
+#     siempre; y un Cancelar que llegaba con el corte ya escrito seguía adelante y borraba el original).
 #  5. Cola de verdad: C + Intro sobre uno y C + Alt+T sobre dos seguidos: se cortan los dos, en orden; el original de
 #     uno se borra y el de dos se conserva; toasts verdes.
 #  6. F = Full: abre su diálogo; Esc no toca nada; F + Intro renombra a -cortado.
+#  7. Cerrar con trabajo pendiente: borrado programado de cinco y corte exacto de cuatro en marcha; Ctrl+Q avisa de
+#     las dos cosas; Esc vuelve y el corte sigue; Ctrl+Q + Intro cierra: cinco se borra, el corte se cancela (cuatro
+#     intacto, sin -cortado ni .part) y no queda ningún ffmpeg.
+#  8. Sólo cortes: reabrir con cuatro, cortarlo y Ctrl+Q: el aviso habla sólo del corte; Intro («Cerrar») cierra y lo
+#     cancela, sin restos.
 # Uso: tests/gui_cutqueue.sh <vídeo A, de 5 minutos o más (a 30 s por tesela hacen falta 10; el corte exacto de
 #      4 minutos tiene que durar lo bastante para encolar y cancelar)> [out]
 set -euo pipefail
@@ -18,14 +25,14 @@ VIDEO_A="$1"; OUT="${2:-/tmp/thumbsheet-gui-cutqueue}"; rm -rf "$OUT"; mkdir -p 
 DIR="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
 export DISPLAY=:65
 export XDG_CACHE_HOME="$OUT/cache" XDG_CONFIG_HOME="$OUT/config" THUMBSHEET_AUDIO=0 THUMBSHEET_DEBUG=1
-EXT="${VIDEO_A##*.}"; K1="$OUT/video/uno.$EXT"; K2="$OUT/video/dos.$EXT"; K3="$OUT/video/tres.$EXT"
-for f in "$K1" "$K2" "$K3"; do cp -f "$VIDEO_A" "$f"; done
+EXT="${VIDEO_A##*.}"; K1="$OUT/video/uno.$EXT"; K2="$OUT/video/dos.$EXT"; K3="$OUT/video/tres.$EXT"; K4="$OUT/video/cuatro.$EXT"; K5="$OUT/video/cinco.$EXT"
+for f in "$K1" "$K2" "$K3" "$K4" "$K5"; do cp -f "$VIDEO_A" "$f"; done
 Xvfb :65 -screen 0 1400x900x24 -nolisten tcp >/dev/null 2>&1 &
 XPID=$!
 trap 'kill $APP 2>/dev/null || true; kill $XPID 2>/dev/null || true' EXIT
 sleep 1
 L="$OUT/app.log"
-python3 "$DIR/thumbsheet.py" "$K1" "$K2" "$K3" >"$L" 2>&1 &
+python3 "$DIR/thumbsheet.py" "$K1" "$K2" "$K3" "$K4" "$K5" >"$L" 2>&1 &
 APP=$!
 for i in $(seq 1 40); do WID=$(xdotool search --onlyvisible --classname thumbsheet 2>/dev/null | head -1 || true); [[ -n "$WID" ]] && break; sleep 0.25; done
 [[ -n "${WID:-}" ]] || { echo "no aparece la ventana"; cat "$L"; exit 1; }
@@ -67,7 +74,7 @@ grep -q "cortar: en cola uno.$EXT y borrar original (0 por delante)" "$L" && ok 
 waitfor "toast cortes: cancelar=" 5 && ok "aviso abajo: $(last 'toast cortes: Cortando')" || ko "sin aviso de cortes: $(last 'toast cortes')"
 [[ "$(last 'toast cortes: Cortando')" == "toast cortes: Cortando uno.$EXT (y luego se borra el original)" ]] && ok "el aviso dice qué se corta y que luego se borra" || ko "texto del aviso: '$(last 'toast cortes: Cortando')'"
 [[ "$(last '\] panel:')" == *"-uno.$EXT, dos.$EXT, tres.$EXT"* ]] && ok "panel: uno fuera de la lista (-) mientras se corta" || ko "panel: '$(last '\] panel:')'"
-[[ "$(last 'archivos:')" == "archivos: 2" ]] && ok "cabecera: 2 archivos" || ko "cabecera: '$(last 'archivos:')'"
+[[ "$(last 'archivos:')" == "archivos: 4" ]] && ok "cabecera: 4 archivos" || ko "cabecera: '$(last 'archivos:')'"
 shot 1-cortando 0.2
 
 # 2. dos, sólo cortar, a la cola detrás de uno; mientras espera, Supr no hace nada
@@ -113,6 +120,7 @@ else
   [[ "$(n 'cut: cancelado')" -gt "$NC" && $((T1-T0)) -lt 3000 ]] && ok "cancelar al instante: acaba en $((T1-T0)) ms" || ko "cancelar al instante no acabó ($((T1-T0)) ms): $(last 'cut:\|cortar:')"
   sleep 0.5
   [[ -f "$K3" && "$(last '\] panel:')" != *"-tres"* ]] && ok "tres sigue en disco y vuelve a la lista" || ko "tres: fichero=$([[ -f "$K3" ]] && echo sí || echo no) panel='$(last '\] panel:')'"
+  [[ -z "$(ls "$OUT/video" | grep '^tres-cortado')" ]] && ok "sin tres-cortado$(grep -q 'cut: cancelado tarde' "$L" && echo ': el Cancelar llegó con el corte ya escrito y se retiró')" || ko "queda $(ls "$OUT/video" | grep '^tres-cortado' | tr '\n' ' ')"
 fi
 waitfor "toast cortes: ninguno" 3 || true
 
@@ -147,6 +155,53 @@ xdotool key Escape; sleep 0.6
 xdotool key f; sleep 0.8; xdotool key Return
 waitfor "full: renombrado" 10 && ok "F + Intro renombra: $(last 'full: renombrado')" || ko "F + Intro no renombró: $(last 'full:')"
 [[ ! -f "$K2" && -n "$(ls "$OUT/video" | grep "^dos-cortado-2\.$EXT$")" ]] && ok "dos.$EXT → dos-cortado-2.$EXT (ya había un dos-cortado)" || ko "ficheros: $(ls "$OUT/video" | tr '\n' ' ')"
-echo "--- log"; grep "cortar:\|cut: \(hecho\|cancelado\|error\|original\)\|toast cortes: [A-Z]" "$L" | tail -12 | cut -c1-150
+
+# 7. cerrar con trabajo pendiente: borrado programado (cinco) y corte en marcha (cuatro, exacto, sólo cortar). Las dos
+#    últimas filas: el paso 4 puede dejar tres o no (si el corte acabó antes de poder cancelarlo)
+sleep 0.8   # la geometría de tras Full (una fila menos)
+NR=$(grep "geometry:" "$L" | tail -1 | sed -E 's/.* rows=([^ ]*).*/\1/' | tr ';' '\n' | grep -c .)
+goto "$NR"
+[[ "$(shown)" == "cinco.$EXT" ]] || { ko "no se pasó a cinco: '$(shown)' (filas: $NR)"; echo "HAY FALLOS"; exit 1; }   # no borrar otro
+xdotool key Delete; sleep 0.8; xdotool key Return; sleep 0.8
+grep -q "eliminar: programado cinco.$EXT" "$L" && ok "cinco: borrado programado" || ko "cinco no se programó: $(last 'eliminar:')"
+[[ "$(shown)" == "cuatro.$EXT" ]] && ok "se pasa a cuatro" || ko "tras programar cinco no se pasó a cuatro: '$(shown)'"
+waitfor "fin: .*\[cuatro\.$EXT\]" 60 || true; sleep 0.3
+xdotool mousemove $(tile 0 0) click 1; sleep 0.4
+xdotool mousemove $(tile 1 3) keydown shift click 1 keyup shift; sleep 0.6
+open_cut || ko "C no abrió el diálogo sobre cuatro"
+xdotool key Down; sleep 0.2; xdotool key alt+t; sleep 1
+grep -q "cortar: empieza cuatro.$EXT" "$L" && ok "cuatro cortándose (exacto, sólo cortar)" || ko "cuatro no empezó a cortarse: $(last 'cortar:')"
+NCC=$(n "cut: cancelado")
+xdotool key ctrl+q; sleep 0.8
+[[ "$(nwin)" == 2 ]] && grep -q "cerrar: 1 pendiente de borrar" "$L" && grep -q "cerrar: 1 corte sin terminar" "$L" && ok "Ctrl+Q avisa de las dos cosas: un borrado y un corte" || ko "Ctrl+Q: ventanas=$(nwin) · $(grep 'cerrar' "$L" | tail -2 | tr '\n' ' ')"
+shot 7-cerrar 0.2
+xdotool key Escape; sleep 0.8
+grep -q "cerrar: se vuelve" "$L" && kill -0 $APP 2>/dev/null && [[ "$(n 'cut: cancelado')" == "$NCC" ]] && ! grep -q "cut: hecho cuatro" "$L" && ok "Esc: se vuelve y el corte sigue" || ko "tras Esc: $(grep 'cerrar\|cut:' "$L" | tail -2 | tr '\n' ' ')"
+xdotool key ctrl+q; sleep 0.8; xdotool key Return
+for i in $(seq 1 40); do kill -0 $APP 2>/dev/null || break; sleep 0.25; done
+! kill -0 $APP 2>/dev/null && ok "Ctrl+Q + Intro cierra la app" || ko "la app no se cerró"
+grep -q "cerrar: confirmado, 1 borrado en marcha" "$L" && grep -q "cerrar: 1 corte cancelado" "$L" && ok "al cerrar se dispara el borrado y se cancela el corte" || ko "cerrar: $(grep 'cerrar' "$L" | tail -3 | tr '\n' ' ')"
+[[ ! -f "$K5" ]] && ok "cinco borrado al cerrar" || ko "cinco sigue en disco"
+[[ -f "$K4" && -z "$(ls "$OUT/video" | grep '^cuatro-cortado')" ]] && ok "cuatro intacto y sin restos del corte (ni -cortado ni .part)" || ko "ficheros: $(ls "$OUT/video" | tr '\n' ' ')"
+left=$(pgrep -c -x ffmpeg || true); [[ "$left" == 0 ]] && ok "sin ffmpeg tras cerrar" || ko "ffmpeg vivos tras cerrar: $left"
+# 8. sólo cortes: reabrir con cuatro (su selección se guardó), cortarlo en exacto y cerrar: el aviso habla sólo del corte
+L="$OUT/app2.log"
+python3 "$DIR/thumbsheet.py" "$K4" >"$L" 2>&1 &
+APP=$!
+for i in $(seq 1 40); do WID=$(xdotool search --onlyvisible --classname thumbsheet 2>/dev/null | head -1 || true); [[ -n "$WID" ]] && break; sleep 0.25; done
+xdotool windowsize "$WID" 1400 900; xdotool windowmove "$WID" 0 0; sleep 0.3
+waitfor "fin: .*\[cuatro\.$EXT\]" 60 || true; sleep 0.5
+open_cut || ko "C no abrió el diálogo sobre cuatro (segunda sesión)"
+xdotool key alt+t; sleep 1
+grep -q "cortar: empieza cuatro.$EXT" "$L" && ok "segunda sesión: cuatro cortándose" || ko "cuatro no empezó a cortarse: $(last 'cortar:')"
+xdotool key ctrl+q; sleep 0.8
+[[ "$(nwin)" == 2 ]] && grep -q "cerrar: 1 corte sin terminar" "$L" && ! grep -q "pendiente de borrar" "$L" && ok "sólo cortes: el aviso habla sólo del corte" || ko "Ctrl+Q: ventanas=$(nwin) · $(grep 'cerrar' "$L" | tail -2 | tr '\n' ' ')"
+shot 8-cerrar-solo-cortes 0.2
+xdotool key Return
+for i in $(seq 1 40); do kill -0 $APP 2>/dev/null || break; sleep 0.25; done
+! kill -0 $APP 2>/dev/null && grep -q "cerrar: 1 corte cancelado" "$L" && ok "Intro («Cerrar») cierra y cancela el corte" || ko "cierre: app $(kill -0 $APP 2>/dev/null && echo viva || echo cerrada) · $(grep 'cerrar' "$L" | tail -2 | tr '\n' ' ')"
+[[ -f "$K4" && -z "$(ls "$OUT/video" | grep '^cuatro-cortado')" ]] && ok "cuatro intacto y sin restos" || ko "ficheros: $(ls "$OUT/video" | tr '\n' ' ')"
+left=$(pgrep -c -x ffmpeg || true); [[ "$left" == 0 ]] && ok "sin ffmpeg tras cerrar" || ko "ffmpeg vivos tras cerrar: $left"
+echo "--- log"; grep "cerrar:\|cortar:\|cut: \(hecho\|cancelado\|error\|original\)\|toast cortes: [A-Z]" "$L" | tail -12 | cut -c1-150
 [[ $fail == 0 ]] && echo "TODO OK" || echo "HAY FALLOS"
 exit $fail

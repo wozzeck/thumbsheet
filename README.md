@@ -130,8 +130,11 @@ thumbsheet                            # sin argumentos: diálogo para elegir ví
   Al confirmar, el diálogo se cierra en seguida y el corte va a una **cola en segundo plano**: los cortes se hacen
   de uno en uno, por orden, mientras sigues con otros vídeos. Abajo queda un aviso con el que está en marcha, su
   progreso (también en el contador) y los que esperan, con **Cancelar**, que para el corte en marcha en el acto
-  (su ffmpeg se mata y el temporal se borra) y quita de la cola los demás. Mientras el corte de un vídeo espera o
-  está en marcha, ese vídeo no se puede eliminar, dar por bueno ni volver a cortar. El resultado queda junto
+  (su ffmpeg se mata y el temporal se borra) y quita de la cola los demás; si el corte acababa de terminar, se
+  respeta igual: el resultado se retira y el original no se borra. Mientras el corte de un vídeo espera o
+  está en marcha, ese vídeo no se puede eliminar, dar por bueno ni volver a cortar. Si cierras la app con cortes
+  sin terminar, avisa (en el mismo diálogo que los borrados programados, si los hay): **Cerrar** (Intro) los
+  cancela, sin dejar nada a medias y sin tocar los originales; **Volver** (Esc) deja que terminen. El resultado queda junto
   al original y no se añade al panel (si ya estaba cargado, se vuelve a sondear porque ha cambiado). El botón de la derecha del diálogo, **Cortar y
   borrar original**, hace las dos cosas de una vez: hay que pulsarlo dos veces seguidas (la primera
   sólo lo arma, en rojo, y se desarma solo a los 5 s), y el original se borra únicamente si el corte

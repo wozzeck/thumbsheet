@@ -5697,7 +5697,8 @@ class ThumbSheet(Gtk.Window):
         self._cut_pct = None
         log("cortar: empieza %s" % job["doc"].path.name)
         self._pause_background()
-        threading.Thread(target=self._cut_worker, args=(job,), name="ts-cut", daemon=True).start()
+        job["thread"] = threading.Thread(target=self._cut_worker, args=(job,), name="ts-cut", daemon=True)
+        job["thread"].start()
         self._refresh_status()
 
     def _cut_worker(self, job):
@@ -5824,6 +5825,15 @@ class ThumbSheet(Gtk.Window):
         doc.cut_jobs = max(0, doc.cut_jobs - 1)
         out = job["out"]
         delete = False
+        if error is None and job["cancel"].is_set():
+            # Cancelar llegó con el corte ya escrito (entre el final de ffmpeg y este aviso): se respeta igualmente; el
+            # resultado se retira y el original no se borra
+            log("cut: cancelado tarde: se retira %s" % out.name)
+            try:
+                out.unlink()
+            except OSError:
+                pass
+            error = "cancelado"
         if error == "cancelado":
             self._flash("Corte cancelado")
             log("cut: cancelado")
@@ -6097,22 +6107,34 @@ class ThumbSheet(Gtk.Window):
         return False
 
     def _confirm_close(self):
-        """Con borrados programados sin disparar, avisa y pide confirmación: «Cerrar y borrar» los dispara ya (en segundo
-        plano: la ventana se cierra sin esperar) y «Volver» deja la app abierta con su aviso. True = cerrar. Si la app
-        muere sin pasar por aquí, lo programado sigue apuntado en disco y se borra al volver a abrirla."""
-        if not self._pending:
-            return True
+        """Con borrados programados sin disparar o cortes sin terminar (en marcha o en la cola), avisa y pide
+        confirmación. «Cerrar…» dispara ya los borrados (en segundo plano: la ventana se cierra sin esperar) y cancela
+        los cortes (ver _abort_cuts: no queda nada a medias y los originales no se tocan); «Volver» deja la app abierta
+        con sus avisos. True = cerrar. Si la app muere sin pasar por aquí, lo programado para borrar sigue apuntado en
+        disco y se borra al volver a abrirla."""
         docs = list(self._pending)
-        n = len(docs)
-        log("cerrar: %d pendiente%s de borrar" % (n, "" if n == 1 else "s"))
+        cuts = ([self._cut] if self._cut is not None else []) + list(self._cut_queue)
+        if not docs and not cuts:
+            return True
+        n, m = len(docs), len(cuts)
+        heads, blocks = [], []
+        if n:
+            log("cerrar: %d pendiente%s de borrar" % (n, "" if n == 1 else "s"))
+            heads.append("%s pendiente%s de borrar" % ("un vídeo" if n == 1 else "%d vídeos" % n, "" if n == 1 else "s"))
+            blocks.append("%s\n\nAl cerrar se borra%s ya, en segundo plano. Para conservar alguno, vuelve y pulsa Cancelar "
+                          "en el aviso." % ("\n".join(str(d.path) for d in docs), "" if n == 1 else "n"))
+        if m:
+            log("cerrar: %d corte%s sin terminar" % (m, "" if m == 1 else "s"))
+            heads.append("un corte sin terminar" if m == 1 else "%d cortes sin terminar" % m)
+            lines = ["%s (%s)" % (j["doc"].path.name, "cortándose" if j is self._cut else "en cola") for j in cuts]
+            blocks.append("%s\n\nAl cerrar se cancela%s: no queda nada a medias y los originales no se tocan. Para que "
+                          "termine%s, vuelve y espera a que desaparezca su aviso." % (
+                              "\n".join(lines), "" if m == 1 else "n", "" if m == 1 else "n"))
         dlg = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.WARNING,
-                                buttons=Gtk.ButtonsType.NONE,
-                                text="Hay %s pendiente%s de borrar" % ("un vídeo" if n == 1 else "%d vídeos" % n,
-                                                                       "" if n == 1 else "s"))
-        dlg.format_secondary_text("%s\n\nAl cerrar se borra%s ya, en segundo plano. Para conservar alguno, vuelve y pulsa "
-                                  "Cancelar en el aviso." % ("\n".join(str(d.path) for d in docs), "" if n == 1 else "n"))
+                                buttons=Gtk.ButtonsType.NONE, text="Hay %s" % " y ".join(heads))
+        dlg.format_secondary_text("\n\n".join(blocks))
         dlg.add_button("_Volver", Gtk.ResponseType.CANCEL)
-        btn = dlg.add_button("Cerrar y _borrar", Gtk.ResponseType.ACCEPT)
+        btn = dlg.add_button("Cerrar y _borrar" if n else "_Cerrar", Gtk.ResponseType.ACCEPT)
         btn.get_style_context().add_class("destructive-action")
         dlg.set_default_response(Gtk.ResponseType.ACCEPT)   # Intro cierra (ver on_delete), Esc vuelve
         btn.grab_focus()
@@ -6121,21 +6143,51 @@ class ThumbSheet(Gtk.Window):
         if resp != Gtk.ResponseType.ACCEPT:
             log("cerrar: se vuelve")
             return False
-        fired = 0
-        for doc in docs:
-            entry = self._pending.pop(doc, None)
-            if entry is None:
-                continue   # se disparó solo mientras el diálogo estaba abierto
-            GLib.source_remove(entry[0])
-            doc.doomed = False
-            self._delete_file(doc)   # hilo no daemon: termina aunque la ventana ya no esté
-            fired += 1
-        log("cerrar: confirmado, %d borrado%s en marcha" % (fired, "" if fired == 1 else "s"))
-        self._refresh_wait()
+        if n:
+            fired = 0
+            for doc in docs:
+                entry = self._pending.pop(doc, None)
+                if entry is None:
+                    continue   # se disparó solo mientras el diálogo estaba abierto
+                GLib.source_remove(entry[0])
+                doc.doomed = False
+                self._delete_file(doc)   # hilo no daemon: termina aunque la ventana ya no esté
+                fired += 1
+            log("cerrar: confirmado, %d borrado%s en marcha" % (fired, "" if fired == 1 else "s"))
+            self._refresh_wait()
+        if m:
+            k = self._abort_cuts()   # los que quedan: alguno pudo acabar con el diálogo abierto
+            log("cerrar: %d corte%s cancelado%s" % (k, "" if k == 1 else "s", "" if k == 1 else "s"))
         return True
 
+    def _abort_cuts(self):
+        """Al cerrar con cortes sin terminar: fuera la cola, y el que está en marcha se cancela en el acto, sin esperar a
+        la vuelta del bucle (la ventana se va): su ffmpeg o ffprobe muere, su hilo borra el temporal y la lista de tramos
+        y, por si no le diera tiempo, el temporal se borra también aquí. Devuelve cuántos se cancelan."""
+        k = len(self._cut_queue)
+        self._cut_queue.clear()
+        job = self._cut
+        if job is None:
+            return k
+        job["cancel"].set()
+        p = job.get("proc")
+        if p is not None:
+            try:
+                p.kill()
+            except OSError:
+                pass
+        th = job.get("thread")
+        if th is not None:
+            th.join(3.0)   # con SIGKILL, milisegundos
+        try:
+            job["out"].with_name(job["out"].name + ".part").unlink()
+        except OSError:
+            pass
+        return k + 1
+
     def on_delete_event(self, *_):
-        """Botón de cerrar de la ventana: con borrados programados pregunta antes (ver _confirm_close)."""
+        """Botón de cerrar de la ventana: con borrados programados o cortes sin terminar pregunta antes (ver
+        _confirm_close)."""
         return not self._confirm_close()
 
     def _delete_file(self, doc, ok_text=None, err_text=None, ok_log=None):

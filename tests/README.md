@@ -30,7 +30,9 @@
   (`_doc_coverage`): capturas del plan hechas o marcadas, sin contar las de otros intervalos.
 - `test_cut_cancel.py <vídeo>` — sin ventana, unos segundos: Cancelar un corte no espera a nadie. `run_cancellable`
   devuelve la salida normal y, con el aviso de cancelar o al pasar el tope, mata el proceso y vuelve al momento;
-  `keyframes_near` y `expand_to_keyframes` con el aviso dado vuelven sin resultado sin lanzar nada.
+  `keyframes_near` y `expand_to_keyframes` con el aviso dado vuelven sin resultado sin lanzar nada. Y un Cancelar
+  que llega con el corte ya escrito (ffmpeg acabó, la interfaz aún no lo había atendido) se respeta: `_cut_done` no
+  borra el original de «cortar y borrar», retira el resultado y devuelve el vídeo a la lista.
 - `test_pending.py` — sin ventana, instantáneo: el registro en disco de los borrados programados por Eliminar
   (`PendingDeletes`, `pending-delete.json` junto a la configuración): añadir sin repetir, quitar, releer, fichero
   ausente o corrupto, sin entradas no queda fichero; y un vídeo a la espera de borrarse no es un vecino al que pasar.
@@ -82,13 +84,16 @@
   segundo plano (toast verde, apunte fuera); `Ctrl+Q` con un borrado programado pregunta (Esc vuelve con el aviso
   intacto, Intro cierra y lo borra igualmente); al arrancar con un apunte pendiente se borran fichero y caché, el
   vídeo no se carga aunque venga en los argumentos y `Ctrl+Q` cierra sin preguntar.
-- `gui_cutqueue.sh <vídeo A de 5 minutos o más> [out]` — Xvfb propio (`:65`), tres copias de A. Los cortes van a una
+- `gui_cutqueue.sh <vídeo A de 5 minutos o más> [out]` — Xvfb propio (`:65`), cinco copias de A. Los cortes van a una
   cola en segundo plano: `C` + Intro (exacto, de la 3.ª a la 10.ª tesela) cierra el diálogo al momento, pasa al
   siguiente, el vídeo sale de la lista y abajo aparece el aviso «Cortando… (y luego se borra el original)» con
   Cancelar; otro corte (`Alt+T`) espera en la cola y, mientras, su vídeo no se puede eliminar; Cancelar detiene el
   corte en marcha en el acto (sin ffmpeg vivos ni restos `-cortado`/`.part`), vacía la cola y el vídeo vuelve a la
   lista; cancelar nada más confirmar (fase de keyframes) también acaba en seguida; dos cortes seguidos se hacen en
   orden, el segundo arranca solo al acabar el primero; `F` abre Full, Esc no toca nada y `F` + Intro renombra.
+  Cerrar con un borrado programado y un corte en marcha: `Ctrl+Q` avisa de las dos cosas, Esc vuelve y el corte
+  sigue, Intro cierra (el borrado se hace, el corte se cancela sin restos ni ffmpeg vivos); al reabrir, sólo con
+  un corte en marcha, el aviso habla sólo del corte e Intro («Cerrar») lo cancela.
 - `gui_snap.sh <vídeo A de unos minutos> [out]` — Xvfb propio (`:69`), una copia de A a 10 s. La barra ya no tiene LLC
   y sí el toggle; sin snap la rueda va por píxeles; al activarlo salta a la fila entera más cercana y gana el relleno
   final (menos de una fila); con snap, la rueda y el arrastre de la barra de scroll sólo se paran en filas enteras,

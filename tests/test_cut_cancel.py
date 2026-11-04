@@ -3,8 +3,9 @@
 ffprobe de la búsqueda de keyframes) devuelve la salida normal, y con el aviso de cancelar o al pasar el tope mata el
 proceso en seco y vuelve en seguida; `keyframes_near` y `expand_to_keyframes` con el aviso ya dado vuelven sin
 resultado al momento (antes, cancelar en la fase «Analizando keyframes…» dejaba el corte «cancelando» para siempre).
+Y un Cancelar que llega con el corte ya escrito se respeta: no se borra el original y se retira el resultado.
 Uso: tests/test_cut_cancel.py <vídeo>"""
-import os, sys, pathlib, threading, time
+import os, sys, pathlib, threading, time, tempfile, types, shutil
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import thumbsheet as T
 
@@ -49,5 +50,69 @@ check(res is None and time.monotonic() - t0 < 1.0, "expand_to_keyframes con el a
 res = T.expand_to_keyframes([(1.0, 2.0)], video, 9.0)
 check(isinstance(res, list) and len(res) == 1 and res[0][0] <= 1.0 and res[0][1] >= 2.0,
       "expand_to_keyframes sin aviso: el tramo crece hasta keyframes (%s)" % res)
+
+
+# Cancelar que llega con el corte ya escrito (ffmpeg acabó, el aviso a la interfaz aún no se ha atendido): visto en la
+# GUI, «cortar y borrar» seguía adelante y borraba el original. _cut_done tiene que respetar el Cancelar.
+class FakeWin(object):
+    def __init__(self, job):
+        self._cut, self._cut_pct, self.calls = job, 5, []
+
+    def _flash(self, text):
+        self.calls.append(("flash", text))
+
+    def _error(self, *a):
+        self.calls.append(("error",) + a)
+
+    def _refresh_output(self, out):
+        self.calls.append(("refresh_output", out))
+
+    def _delete_file(self, *a, **kw):
+        self.calls.append(("delete_file",))
+
+    def _unhide_cut(self, doc):
+        self.calls.append(("unhide", doc))
+
+    def _start_next_background(self):
+        return False
+
+    def _update_buttons(self):
+        pass
+
+    def _cut_next(self):
+        pass
+
+    def _refresh_cuts(self):
+        pass
+
+    def _refresh_status(self):
+        pass
+
+
+tmp = pathlib.Path(tempfile.mkdtemp(prefix="ts-cutcancel-"))
+try:
+    for cancelled in (True, False):
+        out = tmp / ("v-cortado-%d.mp4" % cancelled)
+        out.write_bytes(b"resultado")
+        doc = types.SimpleNamespace(cut_jobs=1, path=tmp / "v.mp4")
+        ev = threading.Event()
+        if cancelled:
+            ev.set()
+        job = {"doc": doc, "out": out, "cancel": ev, "delete": True, "segments": [(0.0, 10.0)], "final": [(0.0, 10.0)],
+               "expected": 10.0}
+        win = FakeWin(job)
+        T.ThumbSheet._cut_done(win, job, 10.0, None)
+        names = [c[0] for c in win.calls]
+        if cancelled:
+            check("delete_file" not in names and not out.exists() and ("unhide", doc) in win.calls
+                  and ("flash", "Corte cancelado") in win.calls and doc.cut_jobs == 0,
+                  "Cancelar con el corte ya escrito: no se borra el original, se retira el resultado y el vídeo vuelve "
+                  "a la lista (%s)" % ", ".join(names))
+        else:
+            check("delete_file" in names and out.exists() and "unhide" not in names and win._cut is None,
+                  "sin Cancelar, el mismo final sigue su curso: se borra el original y el resultado queda (%s)"
+                  % ", ".join(names))
+finally:
+    shutil.rmtree(str(tmp), ignore_errors=True)
 print("TODO OK" if not fails else "FALLOS: %d" % fails)
 sys.exit(1 if fails else 0)
